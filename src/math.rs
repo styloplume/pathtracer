@@ -31,11 +31,7 @@ impl Vec3 {
     }
     #[inline]
     pub fn cross(self, o: Vec3) -> Vec3 {
-        Vec3::new(
-            self.y * o.z - self.z * o.y,
-            self.z * o.x - self.x * o.z,
-            self.x * o.y - self.y * o.x,
-        )
+        Vec3::new(self.y * o.z - self.z * o.y, self.z * o.x - self.x * o.z, self.x * o.y - self.y * o.x)
     }
     #[inline]
     pub fn length_squared(self) -> f32 {
@@ -186,18 +182,14 @@ impl Frame {
         let s = if n.z >= 0.0 { 1.0 } else { -1.0 };
         let a = -1.0 / (s + n.z);
         let b = n.x * n.y * a;
-        Frame {
-            t: Vec3::new(1.0 + s * n.x * n.x * a, s * b, -s * n.x),
-            b: Vec3::new(b, s + n.y * n.y * a, -n.y),
-            n,
-        }
+        Frame { t: Vec3::new(1.0 + s * n.x * n.x * a, s * b, -s * n.x), b: Vec3::new(b, s + n.y * n.y * a, -n.y), n }
     }
     #[inline]
-    pub fn to_local(&self, v: Vec3) -> Vec3 {
+    pub fn to_local(self, v: Vec3) -> Vec3 {
         Vec3::new(v.dot(self.t), v.dot(self.b), v.dot(self.n))
     }
     #[inline]
-    pub fn to_world(&self, v: Vec3) -> Vec3 {
+    pub fn to_world(self, v: Vec3) -> Vec3 {
         self.t * v.x + self.b * v.y + self.n * v.z
     }
 }

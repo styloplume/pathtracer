@@ -142,7 +142,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(e) = run(args) {
+    if let Err(e) = run(&args) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
@@ -175,24 +175,24 @@ pub(crate) fn apply_overrides(scene: &mut Scene, args: &Args) {
     o.save_on_finish |= args.autosave;
 }
 
-fn run(args: Args) -> Result<(), String> {
+fn run(args: &Args) -> Result<(), String> {
     let t0 = Instant::now();
     let mut scene = loader::load_scene(&args.scene)?;
-    apply_overrides(&mut scene, &args);
+    apply_overrides(&mut scene, args);
     println!("loaded {} in {:.2}s: {}", args.scene.display(), t0.elapsed().as_secs_f32(), scene.stats());
     println!("rendering with {} threads", renderer::thread_count(&scene));
-    if args.headless { run_headless(&scene, &args) } else { app::run(scene, &args) }
+    if args.headless { run_headless(&scene, args) } else { app::run(scene, args) }
 }
 
 pub(crate) fn scene_stem(args: &Args) -> String {
-    args.scene.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "render".into())
+    args.scene.file_stem().map_or_else(|| "render".into(), |s| s.to_string_lossy().into_owned())
 }
 
 /// Saves every output configured for `scene` (color, denoised, AOVs).
 pub(crate) fn save_outputs(
     scene: &Scene,
     args: &Args,
-    snap: &Snapshot,
+    snap: &Snapshot<'_>,
     enc: &Encoder,
     default_base: &str,
 ) -> Result<Vec<PathBuf>, String> {
@@ -201,15 +201,17 @@ pub(crate) fn save_outputs(
 }
 
 pub(crate) fn pass_summary(info: &PassInfo) -> String {
+    use std::fmt::Write as _;
     let mut s = format!("{}/{} spp", info.spp, info.target_spp);
+    // Writing to a String cannot fail.
     if info.error.is_finite() {
-        s += &format!("  noise {:.2}%", info.error * 100.0);
+        let _ = write!(s, "  noise {:.2}%", info.error * 100.0);
     }
     if info.active < 1.0 {
-        s += &format!("  active {:.1}%", info.active * 100.0);
+        let _ = write!(s, "  active {:.1}%", info.active * 100.0);
     }
     if info.finished {
-        s += &format!("  ({})", info.stop.describe());
+        let _ = write!(s, "  ({})", info.stop.describe());
     }
     s
 }
@@ -235,7 +237,7 @@ fn run_headless(scene: &Scene, args: &Args) -> Result<(), String> {
     let progress = Headless { start: Instant::now(), last_report: Mutex::new(Instant::now()) };
     let pixels = renderer::render_progressive(scene, &scene.camera, w, h, &progress)
         .expect("render always finishes when not cancelled");
-    let total: u64 = pixels.iter().map(|p| p.n as u64).sum();
+    let total: u64 = pixels.iter().map(|p| u64::from(p.n)).sum();
     let secs = progress.start.elapsed().as_secs_f32();
     println!(
         "done in {secs:.2}s, {:.1} spp average ({:.2} Msamples/s)",

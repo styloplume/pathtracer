@@ -52,25 +52,24 @@ pub fn load_obj(text: &str) -> Result<MeshData, String> {
             Some("mtllib") => m.mtllibs.extend(it.map(str::to_owned)),
             Some("usemtl") => {
                 let name = it.collect::<Vec<_>>().join(" ");
-                group = match m.groups.iter().position(|g| *g == name) {
-                    Some(i) => i as u32,
-                    None => {
-                        m.groups.push(name);
-                        (m.groups.len() - 1) as u32
-                    }
+                group = if let Some(i) = m.groups.iter().position(|g| *g == name) {
+                    i as u32
+                } else {
+                    m.groups.push(name);
+                    (m.groups.len() - 1) as u32
                 };
             }
             Some("f") => {
                 corners.clear();
                 for tok in it {
                     let mut parts = tok.split('/');
-                    let v = resolve_obj_index(parts.next().unwrap_or(""), m.positions.len()).map_err(&err)?;
+                    let v = resolve_obj_index(parts.next().unwrap_or(""), m.positions.len()).map_err(err)?;
                     let t = match parts.next() {
-                        Some(s) if !s.is_empty() => Some(resolve_obj_index(s, m.uvs.len()).map_err(&err)?),
+                        Some(s) if !s.is_empty() => Some(resolve_obj_index(s, m.uvs.len()).map_err(err)?),
                         _ => None,
                     };
                     let n = match parts.next() {
-                        Some(s) if !s.is_empty() => Some(resolve_obj_index(s, m.normals.len()).map_err(&err)?),
+                        Some(s) if !s.is_empty() => Some(resolve_obj_index(s, m.normals.len()).map_err(err)?),
                         _ => None,
                     };
                     corners.push((v, n, t));
@@ -192,12 +191,12 @@ impl Reader<'_> {
         macro_rules! num {
             ($t:ty) => {{
                 let arr = b.try_into().unwrap();
-                (if le { <$t>::from_le_bytes(arr) } else { <$t>::from_be_bytes(arr) }) as f64
+                f64::from(if le { <$t>::from_le_bytes(arr) } else { <$t>::from_be_bytes(arr) })
             }};
         }
         Ok(match ty {
-            Ty::I8 => b[0] as i8 as f64,
-            Ty::U8 => b[0] as f64,
+            Ty::I8 => f64::from(b[0] as i8),
+            Ty::U8 => f64::from(b[0]),
             Ty::I16 => num!(i16),
             Ty::U16 => num!(u16),
             Ty::I32 => num!(i32),
@@ -233,7 +232,7 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
                     Some("binary_little_endian") => Format::BinaryLe,
                     Some("binary_big_endian") => Format::BinaryBe,
                     other => return Err(format!("unknown PLY format {other:?}")),
-                })
+                });
             }
             Some("element") => {
                 let (Some(name), Some(count)) = (t.get(1), t.get(2).and_then(|c| c.parse().ok())) else {
@@ -303,7 +302,7 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
                 }
             }
             if is_vertex {
-                let g = |i: Option<usize>| i.map(|i| vals[i] as f32).unwrap_or(0.0);
+                let g = |i: Option<usize>| i.map_or(0.0, |i| vals[i] as f32);
                 m.positions.push(Vec3::new(g(px), g(py), g(pz)));
                 if has_normals {
                     m.normals.push(Vec3::new(g(nx), g(ny), g(nz)));

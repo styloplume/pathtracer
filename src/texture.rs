@@ -17,7 +17,10 @@ pub struct TexCtx {
 
 enum Texels {
     /// 8-bit storage, decoded through a 256-entry table on lookup.
-    U8 { data: Vec<u8>, srgb: bool },
+    U8 {
+        data: Vec<u8>,
+        srgb: bool,
+    },
     F32(Vec<f32>),
 }
 
@@ -56,7 +59,7 @@ impl TexImage {
                 data.iter()
                     .enumerate()
                     .map(|(i, &v)| {
-                        let x = v as f32 / 65535.0;
+                        let x = f32::from(v) / 65535.0;
                         if srgb && i % ch < color_ch { srgb_to_linear(x) } else { x }
                     })
                     .collect(),
@@ -69,7 +72,7 @@ impl TexImage {
             for x in 0..img.width {
                 let t = img.texel(x, y);
                 for k in 0..3 {
-                    sum[k] += t[k] as f64;
+                    sum[k] += f64::from(t[k]);
                 }
             }
         }
@@ -190,9 +193,7 @@ impl ImageTex {
         let (xa, xb) = (self.wrap.apply(x0, w), self.wrap.apply(x0 + 1, w));
         let (ya, yb) = (self.wrap.apply(y0, h), self.wrap.apply(y0 + 1, h));
         let (a, b, c, d) = (img.texel(xa, ya), img.texel(xb, ya), img.texel(xa, yb), img.texel(xb, yb));
-        std::array::from_fn(|k| {
-            (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy
-        })
+        std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
     }
 
     fn scalar(&self, px: [f32; 4]) -> f32 {
@@ -221,9 +222,21 @@ pub enum Texture {
     Image(Box<ImageTex>),
     /// A texture multiplied by a constant.
     Scaled(Box<Texture>, Vec3),
-    Checker { even: Box<Texture>, odd: Box<Texture>, scale: f32, world: bool },
+    Checker {
+        even: Box<Texture>,
+        odd: Box<Texture>,
+        scale: f32,
+        world: bool,
+    },
     /// Blends `low` -> `high` by Perlin fBm (or turbulence).
-    Noise { low: Box<Texture>, high: Box<Texture>, scale: f32, octaves: u32, turbulence: bool, world: bool },
+    Noise {
+        low: Box<Texture>,
+        high: Box<Texture>,
+        scale: f32,
+        octaves: u32,
+        turbulence: bool,
+        world: bool,
+    },
 }
 
 impl Texture {
@@ -287,7 +300,9 @@ impl Texture {
     /// A UV step suitable for finite differences (bump mapping).
     pub fn du(&self) -> f32 {
         match self {
-            Texture::Image(t) => 0.5 / (t.img.width.max(t.img.height) as f32 * t.scale[0].abs().max(t.scale[1].abs()).max(1e-6)),
+            Texture::Image(t) => {
+                0.5 / (t.img.width.max(t.img.height) as f32 * t.scale[0].abs().max(t.scale[1].abs()).max(1e-6))
+            }
             Texture::Scaled(t, _) => t.du(),
             _ => 1e-3,
         }

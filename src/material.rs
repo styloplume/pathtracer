@@ -47,7 +47,11 @@ pub enum MaterialKind {
 pub enum MetalFresnel {
     Schlick,
     /// Complex index of refraction per RGB channel; `favg` is the hemispherical average.
-    Complex { eta: Vec3, k: Vec3, favg: Vec3 },
+    Complex {
+        eta: Vec3,
+        k: Vec3,
+        favg: Vec3,
+    },
 }
 
 pub struct Principled {
@@ -184,7 +188,7 @@ impl Material {
                 b.push(Lobe::Reflect { alpha: a, fresnel: fr, ms }, 1.0);
             }
             MaterialKind::Dielectric { ior, roughness, .. } => {
-                b.push(Lobe::Dielectric { ior: *ior, alpha: rough(roughness), tint: Vec3::ONE }, 1.0)
+                b.push(Lobe::Dielectric { ior: *ior, alpha: rough(roughness), tint: Vec3::ONE }, 1.0);
             }
             MaterialKind::Plastic { color, roughness, ior } => {
                 let a = rough(roughness);
@@ -218,7 +222,10 @@ impl Principled {
 
         if metallic > 0.0 {
             let favg = (base * 20.0 + Vec3::ONE) / 21.0;
-            b.push(Lobe::Reflect { alpha: a, fresnel: Fresnel::Schlick(base), ms: ms_factor(favg, a) }, metallic * under);
+            b.push(
+                Lobe::Reflect { alpha: a, fresnel: Fresnel::Schlick(base), ms: ms_factor(favg, a) },
+                metallic * under,
+            );
         }
         let dielectric = (1.0 - metallic) * under;
         if dielectric * transmission > 0.0 {
@@ -296,7 +303,11 @@ pub const MAX_LOBES: usize = 6;
 pub enum Fresnel {
     Schlick(Vec3),
     /// Exact conductor Fresnel, multiplied by `tint`.
-    Conductor { eta: Vec3, k: Vec3, tint: Vec3 },
+    Conductor {
+        eta: Vec3,
+        k: Vec3,
+        tint: Vec3,
+    },
     /// Exact dielectric Fresnel for a ray arriving from the outside.
     Dielectric(f32),
 }
@@ -314,17 +325,33 @@ impl Fresnel {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Lobe {
-    Lambert { albedo: Vec3 },
+    Lambert {
+        albedo: Vec3,
+    },
     /// Disney-style retro-reflective sheen for cloth.
-    Sheen { color: Vec3 },
+    Sheen {
+        color: Vec3,
+    },
     /// GGX microfacet reflection (mirror below `MIN_ALPHA`). `ms` is the Kulla–Conty
     /// multiple-scattering Fresnel term when energy compensation is enabled.
-    Reflect { alpha: f32, fresnel: Fresnel, ms: Option<Vec3> },
+    Reflect {
+        alpha: f32,
+        fresnel: Fresnel,
+        ms: Option<Vec3>,
+    },
     /// Reflection + refraction through a dielectric interface; `tint` colors transmission.
-    Dielectric { ior: f32, alpha: f32, tint: Vec3 },
+    Dielectric {
+        ior: f32,
+        alpha: f32,
+        tint: Vec3,
+    },
     /// Lambertian base below a dielectric interface (the coating's specular reflection
     /// is a separate `Reflect` lobe). `fdr` is the interface's internal diffuse reflectance.
-    CoatedDiffuse { albedo: Vec3, ior: f32, fdr: f32 },
+    CoatedDiffuse {
+        albedo: Vec3,
+        ior: f32,
+        fdr: f32,
+    },
 }
 
 impl Lobe {
@@ -633,7 +660,7 @@ fn schlick(f0: Vec3, cos: f32) -> Vec3 {
 }
 
 /// Exact unpolarized Fresnel reflectance of a dielectric interface. `ior` is
-/// eta_inside / eta_outside; a negative `cos_i` means the ray arrives from inside.
+/// `eta_inside` / `eta_outside`; a negative `cos_i` means the ray arrives from inside.
 pub fn fr_dielectric(cos_i: f32, ior: f32) -> f32 {
     let (mut c, mut eta) = (cos_i.clamp(-1.0, 1.0), ior);
     if c < 0.0 {
@@ -647,7 +674,7 @@ pub fn fr_dielectric(cos_i: f32, ior: f32) -> f32 {
     let cos_t = (1.0 - sin2_t).sqrt();
     let r_parl = (eta * c - cos_t) / (eta * c + cos_t);
     let r_perp = (c - eta * cos_t) / (c + eta * cos_t);
-    0.5 * (r_parl * r_parl + r_perp * r_perp)
+    f32::midpoint(r_parl * r_parl, r_perp * r_perp)
 }
 
 /// Exact unpolarized Fresnel reflectance of a conductor with complex IOR eta + i k.
@@ -657,14 +684,14 @@ fn fr_conductor(cos_i: f32, eta: f32, k: f32) -> f32 {
     let (n2, k2) = (eta * eta, k * k);
     let t0 = n2 - k2 - s2;
     let a2b2 = (t0 * t0 + 4.0 * n2 * k2).sqrt();
-    let a = (0.5 * (a2b2 + t0)).max(0.0).sqrt();
+    let a = f32::midpoint(a2b2, t0).max(0.0).sqrt();
     let t1 = a2b2 + c2;
     let t2 = 2.0 * a * c2.sqrt();
     let rs = (t1 - t2) / (t1 + t2);
     let t3 = c2 * a2b2 + s2 * s2;
     let t4 = t2 * s2;
     let rp = rs * (t3 - t4) / (t3 + t4);
-    0.5 * (rp + rs)
+    f32::midpoint(rp, rs)
 }
 
 fn fr_conductor3(cos: f32, eta: Vec3, k: Vec3) -> Vec3 {
@@ -672,7 +699,7 @@ fn fr_conductor3(cos: f32, eta: Vec3, k: Vec3) -> Vec3 {
 }
 
 /// Refracts `wi` through a surface with normal `n` (either side). `ior` is
-/// eta_inside / eta_outside relative to `n`. Returns the direction and the relative IOR used.
+/// `eta_inside` / `eta_outside` relative to `n`. Returns the direction and the relative IOR used.
 fn refract(wi: Vec3, n: Vec3, ior: f32) -> Option<(Vec3, f32)> {
     let (mut n, mut eta) = (n, ior);
     let mut cos_i = n.dot(wi);
@@ -748,7 +775,7 @@ fn sample_ggx_vndf(wo: Vec3, a: f32, u1: f32, u2: f32) -> Vec3 {
     let r = u1.sqrt();
     let phi = 2.0 * PI * u2;
     let p1 = r * phi.cos();
-    let s = 0.5 * (1.0 + vh.z);
+    let s = f32::midpoint(1.0, vh.z);
     let p2 = (1.0 - s) * (1.0 - p1 * p1).max(0.0).sqrt() + s * r * phi.sin();
     let nh = t1 * p1 + t2 * p2 + vh * (1.0 - p1 * p1 - p2 * p2).max(0.0).sqrt();
     Vec3::new(a * nh.x, a * nh.y, nh.z.max(0.0)).normalize()
@@ -792,7 +819,7 @@ fn energy_table() -> &'static EnergyTable {
             let mut acc = 0.0;
             for mi in 0..E_RES - 1 {
                 let (m0, m1) = (mi as f32 / (E_RES - 1) as f32, (mi + 1) as f32 / (E_RES - 1) as f32);
-                acc += 0.5 * (t.e[ai][mi] * m0 + t.e[ai][mi + 1] * m1) * (m1 - m0);
+                acc += f32::midpoint(t.e[ai][mi] * m0, t.e[ai][mi + 1] * m1) * (m1 - m0);
             }
             t.eavg[ai] = (2.0 * acc).min(1.0);
         }
@@ -817,7 +844,7 @@ impl EnergyTable {
     }
 }
 
-/// Multiple-scattering Fresnel term F_ms = Favg^2 Eavg / (1 - Favg (1 - Eavg)), or
+/// Multiple-scattering Fresnel term `F_ms` = Favg^2 Eavg / (1 - Favg (1 - Eavg)), or
 /// None when there is nothing to compensate.
 fn ms_factor(favg: Vec3, a: f32) -> Option<Vec3> {
     if a < MIN_ALPHA {
@@ -868,7 +895,7 @@ mod tests {
         Vec3::new(0.4, 0.1, 0.9).normalize()
     }
 
-    /// Checks sample() against eval() for non-delta samples and returns the
+    /// Checks `sample()` against `eval()` for non-delta samples and returns the
     /// estimated directional albedo (mean weight luminance).
     fn check(b: &Bsdf, wo: Vec3, n: usize) -> f32 {
         let mut rng = Rng::new(7, 0);
@@ -937,7 +964,7 @@ mod tests {
         }
     }
 
-    /// Generalized reciprocity of refraction: f(wo, wi) / eta_i^2 = f(wi, wo) / eta_o^2
+    /// Generalized reciprocity of refraction: f(wo, wi) / `eta_i^2` = f(wi, wo) / `eta_o^2`
     /// (for this importance-mode BSDF), and plain reciprocity for reflection.
     #[test]
     fn rough_dielectric_reciprocity() {

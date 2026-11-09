@@ -60,13 +60,13 @@ pub struct Filter {
 
 impl Filter {
     pub fn new(kind: FilterKind, radius: f32) -> Filter {
-        let r = radius.max(1e-3);
         const N: usize = 4096;
+        let r = radius.max(1e-3);
         let dx = 2.0 * r / N as f32;
         let x = |i: usize| -r + i as f32 * dx;
         let mut cdf = vec![0.0f64; N + 1];
         for i in 0..N {
-            cdf[i + 1] = cdf[i] + 0.5 * (kind.eval(x(i), r) + kind.eval(x(i + 1), r)) as f64 * dx as f64;
+            cdf[i + 1] = cdf[i] + 0.5 * f64::from(kind.eval(x(i), r) + kind.eval(x(i + 1), r)) * f64::from(dx);
         }
         let total = cdf[N];
         let mut icdf = Vec::with_capacity(TABLE);
@@ -103,11 +103,11 @@ mod tests {
         let (mut mean, mut var, mut maxabs) = (0.0f64, 0.0f64, 0.0f32);
         for i in 0..n {
             let x = f.sample((i as f32 + 0.5) / n as f32);
-            mean += x as f64;
-            var += (x * x) as f64;
+            mean += f64::from(x);
+            var += f64::from(x * x);
             maxabs = maxabs.max(x.abs());
         }
-        ((mean / n as f64) as f32, (var / n as f64) as f32, maxabs)
+        ((mean / f64::from(n)) as f32, (var / f64::from(n)) as f32, maxabs)
     }
 
     #[test]

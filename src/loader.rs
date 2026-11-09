@@ -54,13 +54,8 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
     }
     let mut files = vec![path.to_path_buf()];
     files.append(&mut b.files);
-    let geo = Geometry {
-        positions: b.positions,
-        normals: b.normals,
-        uvs: b.uvs,
-        triangles: b.triangles,
-        spheres: b.spheres,
-    };
+    let geo =
+        Geometry { positions: b.positions, normals: b.normals, uvs: b.uvs, triangles: b.triangles, spheres: b.spheres };
     let mut scene = Scene::new(settings, camera, background, b.materials, geo);
     scene.files = files;
     scene.output = output;
@@ -86,13 +81,13 @@ fn num(t: &Table, key: &str, ctx: &str) -> Result<Option<f64>, String> {
 }
 
 fn f32_or(t: &Table, key: &str, default: f32, ctx: &str) -> Result<f32, String> {
-    Ok(num(t, key, ctx)?.map(|v| v as f32).unwrap_or(default))
+    Ok(num(t, key, ctx)?.map_or(default, |v| v as f32))
 }
 
 fn u32_or(t: &Table, key: &str, default: u32, ctx: &str) -> Result<u32, String> {
     match num(t, key, ctx)? {
         None => Ok(default),
-        Some(v) if v >= 0.0 && v.fract() == 0.0 && v <= u32::MAX as f64 => Ok(v as u32),
+        Some(v) if v >= 0.0 && v.fract() == 0.0 && v <= f64::from(u32::MAX) => Ok(v as u32),
         Some(v) => Err(format!("{ctx}: '{key}' must be a non-negative integer, got {v}")),
     }
 }
@@ -126,7 +121,7 @@ fn vec3_value(v: &Value, key: &str, ctx: &str) -> Result<Vec3, String> {
 }
 
 fn vec3_or(t: &Table, key: &str, default: Vec3, ctx: &str) -> Result<Vec3, String> {
-    t.get(key).map(|v| vec3_value(v, key, ctx)).unwrap_or(Ok(default))
+    t.get(key).map_or(Ok(default), |v| vec3_value(v, key, ctx))
 }
 
 fn vec3_req(t: &Table, key: &str, ctx: &str) -> Result<Vec3, String> {
@@ -172,7 +167,7 @@ fn parse_render(t: &Table) -> Result<RenderSettings, String> {
         exposure: f32_or(t, "exposure", d.exposure, ctx)?,
         tonemap,
         clamp: f32_or(t, "clamp", d.clamp, ctx)?,
-        seed: u32_or(t, "seed", 0, ctx)? as u64,
+        seed: u64::from(u32_or(t, "seed", 0, ctx)?),
     };
     if s.width == 0 || s.height == 0 {
         return Err(format!("{ctx}: width and height must be positive"));
@@ -303,7 +298,7 @@ impl Builder {
         Ok(img)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "mirrors the independent TOML/MTL texture options")]
     fn image_texture(
         &mut self,
         file: &Path,
@@ -327,7 +322,9 @@ impl Builder {
             Some(s) => return Err(format!("{ctx}: unknown texture filter '{s}' (bilinear, nearest)")),
         };
         let channel = match str_opt(opts, "channel", ctx)? {
-            Some(s) => Channel::parse(s).ok_or_else(|| format!("{ctx}: unknown channel '{s}' (r, g, b, a, luminance)"))?,
+            Some(s) => {
+                Channel::parse(s).ok_or_else(|| format!("{ctx}: unknown channel '{s}' (r, g, b, a, luminance)"))?
+            }
             None if kind == TexKind::Alpha && (img.channels == 2 || img.channels == 4) => Channel::A,
             None => Channel::Auto,
         };
@@ -372,7 +369,9 @@ impl Builder {
                     },
                     "" => return Err(format!("{ctx}: texture table needs 'file' or 'type'")),
                     other => {
-                        return Err(format!("{ctx}: unknown texture type '{other}' (image, checker, noise, turbulence)"));
+                        return Err(format!(
+                            "{ctx}: unknown texture type '{other}' (image, checker, noise, turbulence)"
+                        ));
                     }
                 };
                 Ok(match t.get("multiplier").or_else(|| t.get("multiply")) {
@@ -441,17 +440,16 @@ impl Builder {
                 if ior <= 0.0 {
                     return Err(format!("{ctx}: 'ior' must be positive"));
                 }
-                let absorption = match t.get("absorption") {
-                    Some(v) => vec3_value(v, "absorption", ctx)?.max(Vec3::ZERO),
-                    None => {
-                        let c = vec3_or(t, "color", Vec3::ONE, ctx)?;
-                        let d = f32_or(t, "distance", 1.0, ctx)?;
-                        if d <= 0.0 {
-                            return Err(format!("{ctx}: 'distance' must be positive"));
-                        }
-                        let s = |c: f32| -c.clamp(1e-6, 1.0).ln() / d;
-                        Vec3::new(s(c.x), s(c.y), s(c.z))
+                let absorption = if let Some(v) = t.get("absorption") {
+                    vec3_value(v, "absorption", ctx)?.max(Vec3::ZERO)
+                } else {
+                    let c = vec3_or(t, "color", Vec3::ONE, ctx)?;
+                    let d = f32_or(t, "distance", 1.0, ctx)?;
+                    if d <= 0.0 {
+                        return Err(format!("{ctx}: 'distance' must be positive"));
                     }
+                    let s = |c: f32| -c.clamp(1e-6, 1.0).ln() / d;
+                    Vec3::new(s(c.x), s(c.y), s(c.z))
                 };
                 let roughness = self.tex_or(t, &["roughness"], splat(0.0), Scalar, ctx, dir)?;
                 MaterialKind::Dielectric { ior, roughness, absorption }
@@ -490,6 +488,7 @@ impl Builder {
             "emissive" | "light" | "emitter" => {
                 let e = self.tex_or(t, &["emission", "color"], Vec3::ONE, Color, ctx, dir)?;
                 let k = f32_or(t, "intensity", 1.0, ctx)?;
+                #[expect(clippy::float_cmp, reason = "exactly 1.0 means no scaling was requested")]
                 let emission = match e.constant() {
                     Some(c) => Texture::Const(c * k),
                     None if k == 1.0 => e,
@@ -596,7 +595,8 @@ impl Builder {
     /// `Pr`/`Pm` -> principled, `Ks` -> plastic (or metal if `Kd` is black), else diffuse.
     fn convert_mtl(&mut self, m: &MtlMaterial, dir: &Path, ctx: &str) -> Result<Material, String> {
         use TexKind::{Alpha, Color, Normal, Scalar};
-        let opt = |b: &mut Self, map: &Option<MtlMap>, kind| map.as_ref().map(|mm| b.mtl_map(mm, kind, dir, ctx)).transpose();
+        let opt =
+            |b: &mut Self, map: &Option<MtlMap>, kind| map.as_ref().map(|mm| b.mtl_map(mm, kind, dir, ctx)).transpose();
         let color = match opt(self, &m.map_kd, Color)? {
             Some(t) => t,
             None => Texture::Const(m.kd.unwrap_or(Vec3::splat(0.8))),
@@ -620,7 +620,11 @@ impl Builder {
             };
             MaterialKind::Emissive { emission, two_sided: false }
         } else if glass {
-            MaterialKind::Dielectric { ior: m.ni.filter(|&n| n > 0.0).unwrap_or(1.5), roughness: Texture::Const(Vec3::ZERO), absorption: Vec3::ZERO }
+            MaterialKind::Dielectric {
+                ior: m.ni.filter(|&n| n > 0.0).unwrap_or(1.5),
+                roughness: Texture::Const(Vec3::ZERO),
+                absorption: Vec3::ZERO,
+            }
         } else if m.pr.is_some() || m.pm.is_some() || m.map_pr.is_some() || m.map_pm.is_some() {
             let metallic = match opt(self, &m.map_pm, Scalar)? {
                 Some(t) => t,
@@ -639,7 +643,7 @@ impl Builder {
                 sheen_tint: Texture::Const(Vec3::splat(0.5)),
             }))
         } else if !ks.is_black() || m.map_ks.is_some() {
-            let kd_black = m.map_kd.is_none() && m.kd.is_none_or(|k| k.is_black());
+            let kd_black = m.map_kd.is_none() && m.kd.is_none_or(Vec3::is_black);
             if kd_black {
                 let color = match opt(self, &m.map_ks, Color)? {
                     Some(t) => t,
@@ -683,7 +687,7 @@ impl Builder {
                 if radius <= 0.0 {
                     return Err(format!("{ctx}: 'radius' must be positive"));
                 }
-                let material = mat.map_or_else(|| self.default_material(), |m| m);
+                let material = mat.unwrap_or_else(|| self.default_material());
                 self.spheres.push(Sphere { center: vec3_or(t, "center", Vec3::ZERO, ctx)?, radius, material });
             }
             "quad" => {
@@ -692,7 +696,7 @@ impl Builder {
                 let o = vec3_req(t, "origin", ctx)?;
                 let u = vec3_req(t, "u", ctx)?;
                 let v = vec3_req(t, "v", ctx)?;
-                let material = mat.map_or_else(|| self.default_material(), |m| m);
+                let material = mat.unwrap_or_else(|| self.default_material());
                 let base = self.positions.len() as u32;
                 let tb = self.uvs.len() as u32;
                 self.positions.extend([o, o + u, o + u + v, o + v]);
@@ -702,7 +706,7 @@ impl Builder {
             }
             "triangle" => {
                 let ps = [vec3_req(t, "p0", ctx)?, vec3_req(t, "p1", ctx)?, vec3_req(t, "p2", ctx)?];
-                let material = mat.map_or_else(|| self.default_material(), |m| m);
+                let material = mat.unwrap_or_else(|| self.default_material());
                 let base = self.positions.len() as u32;
                 self.positions.extend(ps);
                 self.push_tri([base, base + 1, base + 2], None, None, material);
@@ -739,17 +743,17 @@ impl Builder {
         let mut group_mat = Vec::with_capacity(m.groups.len());
         for g in &m.groups {
             let id = match (mat, self.names.get(g)) {
-                (Some(id), _) => id,
-                (None, Some(&id)) => id,
-                (None, None) => match self.mtl_material_id(mesh_dir, &m.mtllibs, g)? {
-                    Some(id) => id,
-                    None => {
+                (Some(id), _) | (None, Some(&id)) => id,
+                (None, None) => {
+                    if let Some(id) = self.mtl_material_id(mesh_dir, &m.mtllibs, g)? {
+                        id
+                    } else {
                         if !g.is_empty() {
                             eprintln!("warning: {ctx}: material '{g}' not defined, using default");
                         }
                         self.default_material()
                     }
-                },
+                }
             };
             group_mat.push(id);
         }
@@ -786,12 +790,7 @@ impl Builder {
         if (p1 - p0).cross(p2 - p0).length_squared() == 0.0 {
             return; // degenerate
         }
-        self.triangles.push(Triangle {
-            v,
-            n: n.unwrap_or([NO_NORMALS; 3]),
-            uv: uv.unwrap_or([NO_UVS; 3]),
-            material,
-        });
+        self.triangles.push(Triangle { v, n: n.unwrap_or([NO_NORMALS; 3]), uv: uv.unwrap_or([NO_UVS; 3]), material });
     }
 }
 

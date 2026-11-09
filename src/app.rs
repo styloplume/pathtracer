@@ -236,6 +236,7 @@ enum Drag {
     Look,
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "independent UI toggles and dirty flags")]
 struct App<'a> {
     args: &'a Args,
     window: Window,
@@ -341,7 +342,7 @@ pub fn run(scene: Scene, args: &Args) -> Result<(), String> {
         needs_present: true,
         last_version: 0,
         last_present: now,
-        last_title: now - Duration::from_secs(1),
+        last_title: now.checked_sub(Duration::from_secs(1)).unwrap(),
         reported_generation: 0,
         hud: true,
         help: false,
@@ -553,9 +554,9 @@ impl App<'_> {
     fn tick_fly(&mut self) {
         let dt = self.last_tick.elapsed().as_secs_f32().min(0.1);
         self.last_tick = Instant::now();
-        let held = |k: Key| self.held.contains(&k) as i32 as f32;
+        let held = |k: Key| i32::from(self.held.contains(&k)) as f32;
         let c = Key::Char;
-        let local = crate::math::Vec3::new(
+        let local = Vec3::new(
             held(c('d')) + held(Key::Right) - held(c('a')) - held(Key::Left),
             held(c('e')) - held(c('q')),
             held(c('w')) + held(Key::Up) - held(c('s')) - held(Key::Down),
@@ -654,8 +655,10 @@ impl App<'_> {
             self.controller = CameraController::new(&scene.camera);
             *self.shared.camera.lock().unwrap() = self.controller.desc();
         }
-        let exposure = if scene.settings.exposure != old.exposure { scene.settings.exposure } else { self.exposure };
-        let tonemap = if scene.settings.tonemap != old.tonemap { scene.settings.tonemap } else { self.tonemap };
+        // Keep runtime tweaks unless the scene file itself changed the value.
+        #[expect(clippy::float_cmp, reason = "detecting an edit, not comparing computed values")]
+        let exposure = if scene.settings.exposure == old.exposure { self.exposure } else { scene.settings.exposure };
+        let tonemap = if scene.settings.tonemap == old.tonemap { self.tonemap } else { scene.settings.tonemap };
         self.set_view(exposure, tonemap);
         self.fly_speed = fly_speed(&scene);
         self.watcher = Watcher::new(&scene.files, Some(&self.watcher));
@@ -792,7 +795,7 @@ impl App<'_> {
             }
         }
         if self.help {
-            lines.extend(HELP.iter().map(|s| s.to_string()));
+            lines.extend(HELP.iter().map(ToString::to_string));
         }
         lines
     }

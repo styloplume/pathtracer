@@ -1,0 +1,5 @@
+[alias]
+# Lints as errors, across the binary and its tests.
+lint = "clippy --all-targets --locked -- -D warnings"
+# Same, applying machine-applicable fixes.
+lint-fix = "clippy --all-targets --fix --allow-dirty --allow-staged"

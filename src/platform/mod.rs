@@ -23,14 +23,38 @@ pub enum Event {
     Paint,
     /// The window lost keyboard focus; held keys and buttons should be considered released.
     FocusLost,
-    KeyDown { key: Key, mods: Modifiers, repeat: bool },
-    KeyUp { key: Key, mods: Modifiers },
+    KeyDown {
+        key: Key,
+        mods: Modifiers,
+        repeat: bool,
+    },
+    KeyUp {
+        key: Key,
+        mods: Modifiers,
+    },
     /// Client-area coordinates in physical pixels (may be outside the window while captured).
-    MouseDown { button: MouseButton, x: i32, y: i32, mods: Modifiers },
-    MouseUp { button: MouseButton, x: i32, y: i32, mods: Modifiers },
-    MouseMove { x: i32, y: i32, mods: Modifiers },
+    MouseDown {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        mods: Modifiers,
+    },
+    MouseUp {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        mods: Modifiers,
+    },
+    MouseMove {
+        x: i32,
+        y: i32,
+        mods: Modifiers,
+    },
     /// Wheel rotation in notches; positive = away from the user.
-    Wheel { delta: f32, mods: Modifiers },
+    Wheel {
+        delta: f32,
+        mods: Modifiers,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

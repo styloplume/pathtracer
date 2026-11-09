@@ -97,9 +97,8 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, String> {
     }
     let (w, h, depth, ctype, interlace) = ihdr.ok_or("missing IHDR")?;
     let spp = match ctype {
-        0 => 1,
+        0 | 3 => 1, // gray, palette index
         2 => 3,
-        3 => 1,
         4 => 2,
         6 => 4,
         _ => return Err(format!("invalid PNG color type {ctype}")),
@@ -148,7 +147,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, String> {
                     0 => 0,
                     1 => a,
                     2 => b,
-                    3 => ((a as u16 + b as u16) / 2) as u8,
+                    3 => u16::midpoint(u16::from(a), u16::from(b)) as u8,
                     4 => paeth(a, b, c),
                     _ => return Err(format!("invalid filter type {f}")),
                 };
@@ -161,10 +160,10 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, String> {
                     let idx = px * spp + c;
                     let v = match depth {
                         16 => u16::from_be_bytes([cur[idx * 2], cur[idx * 2 + 1]]),
-                        8 => cur[idx] as u16,
+                        8 => u16::from(cur[idx]),
                         _ => {
                             let bit = idx * depth;
-                            ((cur[bit / 8] >> (8 - depth - bit % 8)) & ((1 << depth) - 1) as u8) as u16
+                            u16::from((cur[bit / 8] >> (8 - depth - bit % 8)) & ((1 << depth) - 1) as u8)
                         }
                     };
                     samples[(y * w + x) * spp + c] = v;
@@ -212,7 +211,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, String> {
     } else if depth == 8 {
         Pixels::U8(samples.into_iter().map(|v| v as u8).collect())
     } else {
-        Pixels::U8(samples.into_iter().map(|v| (v as u32 * 255 / maxv as u32) as u8).collect())
+        Pixels::U8(samples.into_iter().map(|v| (u32::from(v) * 255 / u32::from(maxv)) as u8).collect())
     };
     Ok(RawImage { width: w, height: h, channels, pixels })
 }
@@ -276,9 +275,9 @@ fn decode_pnm(data: &[u8]) -> Result<RawImage, String> {
     } else {
         let body = &data[tk.binary_start().min(data.len())..];
         if maxv < 256 {
-            vals.extend(body.iter().take(n).map(|&b| b as u32));
+            vals.extend(body.iter().take(n).map(|&b| u32::from(b)));
         } else {
-            vals.extend(body.as_chunks::<2>().0.iter().take(n).map(|&c| u16::from_be_bytes(c) as u32));
+            vals.extend(body.as_chunks::<2>().0.iter().take(n).map(|&c| u32::from(u16::from_be_bytes(c))));
         }
         if vals.len() < n {
             return Err("pixel data too short".into());
@@ -416,10 +415,10 @@ fn decode_hdr(data: &[u8]) -> Result<RawImage, String> {
         for (x, p) in scan.iter().enumerate() {
             let o = (row * w + x) * 3;
             if p[3] != 0 {
-                let f = ((p[3] as i32 - 136) as f32).exp2();
-                out[o] = (p[0] as f32 + 0.5) * f;
-                out[o + 1] = (p[1] as f32 + 0.5) * f;
-                out[o + 2] = (p[2] as f32 + 0.5) * f;
+                let f = ((i32::from(p[3]) - 136) as f32).exp2();
+                out[o] = (f32::from(p[0]) + 0.5) * f;
+                out[o + 1] = (f32::from(p[1]) + 0.5) * f;
+                out[o + 2] = (f32::from(p[2]) + 0.5) * f;
             }
         }
     }
@@ -529,7 +528,7 @@ fn tga_color(b: &[u8], bits: usize) -> Result<[u8; 4], String> {
     Ok(match bits {
         15 | 16 => {
             let v = u16::from_le_bytes([b[0], b[1]]);
-            let c = |s: u16| (((v >> s) & 31) as u32 * 255 / 31) as u8;
+            let c = |s: u16| (u32::from((v >> s) & 31) * 255 / 31) as u8;
             [c(10), c(5), c(0), if bits == 16 && v & 0x8000 == 0 { 0 } else { 255 }]
         }
         24 => [b[2], b[1], b[0], 255],
@@ -551,9 +550,9 @@ mod tests {
         }
     }
 
-    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+    fn chunk(out: &mut Vec<u8>, kind: [u8; 4], body: &[u8]) {
         out.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        out.extend_from_slice(kind);
+        out.extend_from_slice(&kind);
         out.extend_from_slice(body);
         out.extend_from_slice(&[0; 4]); // CRC is not checked by the decoder
     }
@@ -564,12 +563,12 @@ mod tests {
         let mut ihdr = w.to_be_bytes().to_vec();
         ihdr.extend_from_slice(&h.to_be_bytes());
         ihdr.extend_from_slice(&[depth, ctype, 0, 0, interlace]);
-        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, *b"IHDR", &ihdr);
         for (k, b) in extra {
-            chunk(&mut out, k, b);
+            chunk(&mut out, **k, b);
         }
-        chunk(&mut out, b"IDAT", &deflate::zlib_compress(raw));
-        chunk(&mut out, b"IEND", &[]);
+        chunk(&mut out, *b"IDAT", &deflate::zlib_compress(raw));
+        chunk(&mut out, *b"IEND", &[]);
         out
     }
 

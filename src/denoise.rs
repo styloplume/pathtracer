@@ -131,6 +131,7 @@ fn filter_pixel(color: &[Vec3], var: &[f32], g: &Guides, x: usize, y: usize, ste
             }
             let zq = g.depth[j];
             let dist = step as f32 * (((kx as f32 - 2.0).powi(2) + (ky as f32 - 2.0).powi(2)).sqrt());
+            #[expect(clippy::float_cmp, reason = "both pixels carry the same no-hit depth sentinel")]
             let ez = if zp > 0.0 && zq > 0.0 {
                 (zp - zq).abs() / (SIGMA_DEPTH * zp.min(zq) * dist + 1e-6)
             } else if zp == zq {

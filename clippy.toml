@@ -1,0 +1,7 @@
+# Unit tests may use unwrap/expect/panic/dbg freely.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+# Long functions are fine for parsers and the integrator; flag only the truly huge.
+too-many-lines-threshold = 150

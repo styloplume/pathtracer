@@ -30,9 +30,10 @@ impl Bvh {
         let mut indices: Vec<u32> = (0..n as u32).collect();
         let mut nodes = Vec::with_capacity(2 * n.max(1));
         if n > 0 {
-            let centroids: Vec<Vec3> = prim_bounds.iter().map(|b| b.centroid()).collect();
+            let centroids: Vec<Vec3> = prim_bounds.iter().map(Aabb::centroid).collect();
             nodes.push(Node { bounds: Aabb::EMPTY, first: 0, count: 0 });
-            let mut b = Builder { nodes: &mut nodes, indices: &mut indices, bounds: prim_bounds, centroids: &centroids };
+            let mut b =
+                Builder { nodes: &mut nodes, indices: &mut indices, bounds: prim_bounds, centroids: &centroids };
             b.subdivide(0, 0, n);
         }
         Bvh { nodes, indices }
@@ -121,9 +122,10 @@ impl Builder<'_> {
             }
             let scale = BINS as f32 / ext[best_axis];
             let (min, centroids) = (cb.min[best_axis], self.centroids);
-            start + partition(&mut self.indices[start..end], |i| {
-                bin_of(centroids[i as usize][best_axis], min, scale) < best_split
-            })
+            start
+                + partition(&mut self.indices[start..end], |i| {
+                    bin_of(centroids[i as usize][best_axis], min, scale) < best_split
+                })
         } else {
             // All centroids coincide: no plane separates them.
             if count <= MAX_LEAF {

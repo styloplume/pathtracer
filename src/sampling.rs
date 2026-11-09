@@ -9,11 +9,7 @@ pub fn concentric_disk(u1: f32, u2: f32) -> (f32, f32) {
     if a == 0.0 && b == 0.0 {
         return (0.0, 0.0);
     }
-    let (r, theta) = if a.abs() > b.abs() {
-        (a, (PI / 4.0) * (b / a))
-    } else {
-        (b, PI / 2.0 - (PI / 4.0) * (a / b))
-    };
+    let (r, theta) = if a.abs() > b.abs() { (a, (PI / 4.0) * (b / a)) } else { (b, PI / 2.0 - (PI / 4.0) * (a / b)) };
     (r * theta.cos(), r * theta.sin())
 }
 

@@ -145,7 +145,8 @@ impl Parser {
                         self.expect(']')?;
                     }
                     self.end_of_line()?;
-                    let res = if is_array { push_array_table(&mut root, &path) } else { walk(&mut root, &path).map(|_| ()) };
+                    let res =
+                        if is_array { push_array_table(&mut root, &path) } else { walk(&mut root, &path).map(|_| ()) };
                     if let Err(e) = res {
                         return self.err(e);
                     }

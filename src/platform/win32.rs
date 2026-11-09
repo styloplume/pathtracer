@@ -2,7 +2,8 @@
 //! mouse, resize), and blit a 32-bit framebuffer with GDI, optionally with a text
 //! overlay composed in an off-screen buffer to avoid flicker.
 
-#![allow(non_snake_case, clippy::upper_case_acronyms)]
+#![expect(unsafe_code, reason = "raw Win32 FFI; the only module allowed to use unsafe")]
+#![expect(non_snake_case, clippy::upper_case_acronyms, reason = "mirror the Win32 SDK names verbatim")]
 
 use super::{Event, Key, Modifiers, MouseButton};
 use std::cell::RefCell;
@@ -217,6 +218,7 @@ fn push(e: Event) {
 }
 
 fn modifiers() -> Modifiers {
+    // SAFETY: GetKeyState takes a plain integer and has no preconditions.
     let down = |vk| unsafe { GetKeyState(vk) } < 0;
     Modifiers { shift: down(VK_SHIFT), ctrl: down(VK_CONTROL), alt: down(VK_MENU) }
 }
@@ -242,7 +244,7 @@ fn translate_key(vk: usize) -> Key {
 
 /// Signed client coordinates packed in an LPARAM.
 fn mouse_pos(lparam: LPARAM) -> (i32, i32) {
-    ((lparam & 0xFFFF) as u16 as i16 as i32, ((lparam >> 16) & 0xFFFF) as u16 as i16 as i32)
+    (i32::from((lparam & 0xFFFF) as u16 as i16), i32::from(((lparam >> 16) & 0xFFFF) as u16 as i16))
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -259,6 +261,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_PAINT => {
+            // SAFETY: `hwnd` is the live window this message was dispatched to; null means the whole client area.
             unsafe { ValidateRect(hwnd, null()) };
             push(Event::Paint);
             0
@@ -289,6 +292,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 _ => MouseButton::Middle,
             };
             // Keep receiving mouse moves while dragging outside the window.
+            // SAFETY: `hwnd` is the live window this message was dispatched to.
             unsafe { SetCapture(hwnd) };
             let (x, y) = mouse_pos(lparam);
             push(Event::MouseDown { button, x, y, mods: modifiers() });
@@ -301,6 +305,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 _ => MouseButton::Middle,
             };
             if wparam & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON) == 0 {
+                // SAFETY: no arguments; releasing capture we may not hold is a harmless no-op.
                 unsafe { ReleaseCapture() };
             }
             let (x, y) = mouse_pos(lparam);
@@ -308,10 +313,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_MOUSEWHEEL => {
-            let delta = ((wparam >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0;
+            let delta = f32::from(((wparam >> 16) & 0xFFFF) as u16 as i16) / 120.0;
             push(Event::Wheel { delta, mods: modifiers() });
             0
         }
+        // SAFETY: forwards the exact arguments Windows passed to this window procedure.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -330,12 +336,15 @@ impl Window {
     /// Creates a window whose client area is `w`x`h` pixels, shrunk (keeping the aspect
     /// ratio) if it would not fit on the screen.
     pub fn new(title: &str, w: u32, h: u32) -> Result<Window, String> {
+        // SAFETY: every pointer passed below refers to a local (`wc`, `r`, and the NUL-terminated
+        // `class`/`title`/`face` buffers) that outlives the call using it; handles come from the
+        // preceding calls and are checked where Win32 reports failure through them.
         unsafe {
             SetProcessDPIAware();
             let instance = GetModuleHandleW(null());
             let class = wide("PathTracerWindowClass");
             let wc = WNDCLASSEXW {
-                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                cbSize: size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: wndproc,
                 cbClsExtra: 0,
@@ -348,7 +357,7 @@ impl Window {
                 lpszClassName: class.as_ptr(),
                 hIconSm: null_mut(),
             };
-            if RegisterClassExW(&wc) == 0 {
+            if RegisterClassExW(&raw const wc) == 0 {
                 return Err("RegisterClassExW failed".into());
             }
 
@@ -357,7 +366,7 @@ impl Window {
             let (cw, ch) = ((w as f32 * fit) as i32, (h as f32 * fit) as i32);
             let style = WS_OVERLAPPEDWINDOW;
             let mut r = RECT { left: 0, top: 0, right: cw.max(1), bottom: ch.max(1) };
-            AdjustWindowRect(&mut r, style, 0);
+            AdjustWindowRect(&raw mut r, style, 0);
 
             let title = wide(title);
             let hwnd = CreateWindowExW(
@@ -392,12 +401,14 @@ impl Window {
         }
     }
 
+    #[expect(clippy::unused_self, reason = "ties message pumping to the window's owner thread")]
     pub fn poll_events(&mut self) -> Vec<Event> {
+        // SAFETY: MSG is plain old data, so all-zero is valid; `msg` outlives each call that borrows it.
         unsafe {
             let mut msg: MSG = std::mem::zeroed();
-            while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+            while PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
             }
         }
         EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
@@ -405,7 +416,8 @@ impl Window {
 
     pub fn client_size(&self) -> (u32, u32) {
         let mut r = RECT::default();
-        unsafe { GetClientRect(self.hwnd, &mut r) };
+        // SAFETY: `self.hwnd` stays valid until Drop; `r` is a live, writable RECT.
+        unsafe { GetClientRect(self.hwnd, &raw mut r) };
         ((r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32)
     }
 
@@ -422,7 +434,7 @@ impl Window {
         }
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: w as i32,
                 biHeight: -(h as i32), // negative: top-down rows
                 biPlanes: 1,
@@ -436,6 +448,9 @@ impl Window {
             },
             bmiColors: [0],
         };
+        // SAFETY: `pixels` holds at least `w * h` pixels (checked above) as described by `bmi`; the
+        // DC and the off-screen bitmap/DC are released before returning and the old GDI objects
+        // are reselected first; text buffers outlive the TextOutW calls.
         unsafe {
             let dc = GetDC(self.hwnd);
             let blit = |target: HDC| {
@@ -450,8 +465,8 @@ impl Window {
                     0,
                     w as i32,
                     h as i32,
-                    pixels.as_ptr() as *const c_void,
-                    &bmi,
+                    pixels.as_ptr().cast::<c_void>(),
+                    &raw const bmi,
                     DIB_RGB_COLORS,
                     SRCCOPY,
                 );
@@ -471,9 +486,9 @@ impl Window {
                     let text: Vec<u16> = line.encode_utf16().collect();
                     let y = pad + i as i32 * self.line_height;
                     // Drop shadow keeps the text readable on any background.
-                    SetTextColor(mem, 0x000000);
+                    SetTextColor(mem, 0x00_00_00);
                     TextOutW(mem, pad + 1, y + 1, text.as_ptr(), text.len() as i32);
-                    SetTextColor(mem, 0xFFFFFF);
+                    SetTextColor(mem, 0xFF_FF_FF);
                     TextOutW(mem, pad, y, text.as_ptr(), text.len() as i32);
                 }
                 SelectObject(mem, old_font);
@@ -488,12 +503,15 @@ impl Window {
 
     pub fn set_title(&self, title: &str) {
         let t = wide(title);
+        // SAFETY: `self.hwnd` stays valid until Drop; `t` is NUL-terminated and outlives the call.
         unsafe { SetWindowTextW(self.hwnd, t.as_ptr()) };
     }
 }
 
 impl Drop for Window {
     fn drop(&mut self) {
+        // SAFETY: both handles were created in `new`, are owned solely by this Window, and are
+        // destroyed exactly once here.
         unsafe {
             DestroyWindow(self.hwnd);
             if !self.font.is_null() {

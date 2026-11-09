@@ -4,7 +4,7 @@
 //!
 //! 1. **Coarse-to-fine preview.** With a block size `B` starting at `initial_block`
 //!    (a power of two), one sample is traced for every pixel whose coordinates are
-//!    multiples of `B`; on display that "anchor" pixel's color fills its whole BxB
+//!    multiples of `B`; on display that "anchor" pixel's color fills its whole `BxB`
 //!    block. `B` is then halved, and only anchors not already traced at a coarser
 //!    level are traced. When `B` reaches 1, every pixel holds exactly one sample, so
 //!    no work is wasted on the preview.
@@ -165,7 +165,7 @@ pub trait Progress: Sync {
 
 pub fn thread_count(scene: &Scene) -> usize {
     match scene.settings.threads {
-        0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+        0 => std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
         n => n,
     }
 }
@@ -290,7 +290,7 @@ fn active_mask(errors: &[f32], w: usize, h: usize, threshold: f32) -> Vec<bool> 
 
 /// `level = Some((block, is_first_level))` for preview passes, `None` for a full pass.
 fn run_pass(
-    ctx: &Ctx,
+    ctx: &Ctx<'_>,
     pixels: &mut [Pixel],
     level: Option<(usize, bool)>,
     sample: u32,
@@ -338,10 +338,10 @@ fn run_pass(
 }
 
 #[inline]
-fn trace_pixel(ctx: &Ctx, x: usize, y: usize, sample: u32) -> PathSample {
+fn trace_pixel(ctx: &Ctx<'_>, x: usize, y: usize, sample: u32) -> PathSample {
     let scene = ctx.scene;
     let pixel_index = (y * ctx.w + x) as u64;
-    let seed = hash64(hash64(pixel_index ^ (scene.settings.seed << 40)) ^ sample as u64);
+    let seed = hash64(hash64(pixel_index ^ (scene.settings.seed << 40)) ^ u64::from(sample));
     let mut rng = Rng::new(seed, pixel_index);
     // Filter importance sampling: the offset from the pixel center follows the filter.
     let s = (x as f32 + 0.5 + ctx.filter.sample(rng.f32())) / ctx.w as f32;
@@ -472,7 +472,7 @@ pub fn resolve_rows(
     h: usize,
     block: usize,
     rows: Range<usize>,
-    shader: &Shader,
+    shader: &Shader<'_>,
     out: &mut [u32],
 ) {
     let block = block.max(1);
@@ -491,7 +491,7 @@ pub fn resolve_rows(
 
 /// Resolves the whole accumulation buffer to display pixels.
 #[cfg(test)]
-pub fn resolve_display(pixels: &[Pixel], w: usize, h: usize, block: usize, shader: &Shader) -> Vec<u32> {
+pub fn resolve_display(pixels: &[Pixel], w: usize, h: usize, block: usize, shader: &Shader<'_>) -> Vec<u32> {
     let mut out = vec![0u32; w * h];
     resolve_rows(pixels, w, h, block, 0..h, shader, &mut out);
     out

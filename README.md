@@ -79,6 +79,24 @@ exposure and tonemap changes are kept unless that part of the file changed.
 | `src/toml.rs`, `src/mesh.rs`, `src/mtl.rs`, `src/image.rs` | parsers / writers |
 | `src/platform/` | native window |
 
+## Development
+
+The toolchain is pinned in `rust-toolchain.toml`; rustup installs it with `rustfmt` and `clippy`.
+
+| Command | Checks |
+|---|---|
+| `cargo fmt --all` | formatting (`rustfmt.toml`: 120 columns) |
+| `cargo lint` | clippy over the binary and tests, warnings as errors |
+| `cargo lint-fix` | applies clippy's machine-applicable fixes |
+| `cargo test --release` | unit tests and render checksums |
+
+Lint policy is in `Cargo.toml` under `[lints]`: `clippy::pedantic` plus a few restriction lints, with
+numeric-cast lints turned off as noise for renderer code. `unsafe` is denied everywhere except
+`src/platform/win32.rs`, and every `unsafe` block needs a `// SAFETY:` comment. Silence a lint at a site
+with `#[expect(lint, reason = "...")]`; plain `#[allow]` and a missing reason are both flagged.
+
+Enable the pre-commit hook (fmt, lint, rustdoc) once per clone: `git config core.hooksPath .githooks`.
+
 See `scenes/cornell.toml` for an annotated scene file and `scenes/materials.toml` for materials and textures.
 
 Note: the glass `tint` parameter was replaced by Beer–Lambert absorption (`color` = transmittance after

@@ -88,7 +88,7 @@ impl Encoder {
     fn srgb(&self, v: f32) -> u32 {
         let n = (SRGB_LUT_SIZE - 1) as f32;
         // NaN and negatives map to index 0 (`as usize` saturates).
-        self.lut[((v.min(1.0) * n + 0.5) as usize).min(SRGB_LUT_SIZE - 1)] as u32
+        u32::from(self.lut[((v.min(1.0) * n + 0.5) as usize).min(SRGB_LUT_SIZE - 1)])
     }
 
     /// Exposure + tone mapping + sRGB.
@@ -122,8 +122,8 @@ fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[inline]
 pub(crate) fn paeth(a: u8, b: u8, c: u8) -> u8 {
-    let p = a as i16 + b as i16 - c as i16;
-    let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
+    let p = i16::from(a) + i16::from(b) - i16::from(c);
+    let (pa, pb, pc) = ((p - i16::from(a)).abs(), (p - i16::from(b)).abs(), (p - i16::from(c)).abs());
     if pa <= pb && pa <= pc {
         a
     } else if pb <= pc {
@@ -150,10 +150,10 @@ fn filter_rows(data: &[u8], stride: usize, bpp: usize) -> Vec<u8> {
             cand[0][i] = x;
             cand[1][i] = x.wrapping_sub(a);
             cand[2][i] = x.wrapping_sub(b);
-            cand[3][i] = x.wrapping_sub(((a as u16 + b as u16) / 2) as u8);
+            cand[3][i] = x.wrapping_sub(u16::midpoint(u16::from(a), u16::from(b)) as u8);
             cand[4][i] = x.wrapping_sub(paeth(a, b, c));
         }
-        let score = |r: &[u8]| r.iter().map(|&v| (v as i8).unsigned_abs() as u32).sum::<u32>();
+        let score = |r: &[u8]| r.iter().map(|&v| u32::from((v as i8).unsigned_abs())).sum::<u32>();
         let best = (0..5).min_by_key(|&f| score(&cand[f])).unwrap();
         out.push(best as u8);
         out.extend_from_slice(&cand[best]);
@@ -177,16 +177,16 @@ pub fn encode_png(width: usize, height: usize, rgb: &[u8]) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(z.len() + 64);
     out.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
-    write_chunk(&mut out, b"IHDR", &ihdr);
-    write_chunk(&mut out, b"IDAT", &z);
-    write_chunk(&mut out, b"IEND", &[]);
+    write_chunk(&mut out, *b"IHDR", &ihdr);
+    write_chunk(&mut out, *b"IDAT", &z);
+    write_chunk(&mut out, *b"IEND", &[]);
     out
 }
 
-fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+fn write_chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
     let start = out.len();
-    out.extend_from_slice(kind);
+    out.extend_from_slice(&kind);
     out.extend_from_slice(data);
     let crc = crc32(&out[start..]);
     out.extend_from_slice(&crc.to_be_bytes());
@@ -203,7 +203,7 @@ fn crc32(data: &[u8]) -> u32 {
     }
     let mut crc = 0xFFFF_FFFFu32;
     for &b in data {
-        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        crc = table[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
     }
     crc ^ 0xFFFF_FFFF
 }
@@ -337,7 +337,7 @@ mod tests {
                     0 => 0,
                     1 => a,
                     2 => b,
-                    3 => ((a as u16 + b as u16) / 2) as u8,
+                    3 => u16::midpoint(u16::from(a), u16::from(b)) as u8,
                     _ => paeth(a, b, c),
                 };
                 img[y * stride + i] = src[i].wrapping_add(pred);
@@ -388,8 +388,8 @@ mod tests {
                 if p[3] == 0 {
                     return Vec3::ZERO;
                 }
-                let f = ((p[3] as i32 - 136) as f32).exp2();
-                Vec3::new((p[0] as f32 + 0.5) * f, (p[1] as f32 + 0.5) * f, (p[2] as f32 + 0.5) * f)
+                let f = ((i32::from(p[3]) - 136) as f32).exp2();
+                Vec3::new((f32::from(p[0]) + 0.5) * f, (f32::from(p[1]) + 0.5) * f, (f32::from(p[2]) + 0.5) * f)
             }));
         }
         assert_eq!(pos, data.len());

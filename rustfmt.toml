@@ -1,0 +1,8 @@
+# Stable rustfmt options only. Wider lines and "Max" heuristics keep dense math readable
+# (short struct literals, vector expressions and if/else stay on one line).
+edition = "2024"
+max_width = 120
+use_small_heuristics = "Max"
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true

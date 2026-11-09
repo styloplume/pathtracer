@@ -72,7 +72,7 @@ pub fn parse(text: &str) -> Result<Vec<MtlMaterial>, String> {
             "tf" => m.tf = Some(color()?),
             "ns" => m.ns = Some(scalar()?),
             "ni" => m.ni = Some(scalar()?),
-            "d" => m.d = Some(f(if rest.first() == Some(&"-halo") { 1 } else { 0 }).ok_or_else(|| err("malformed 'd'"))?),
+            "d" => m.d = Some(f(usize::from(rest.first() == Some(&"-halo"))).ok_or_else(|| err("malformed 'd'"))?),
             "tr" => m.d = Some(1.0 - scalar()?),
             "illum" => m.illum = Some(scalar()? as u32),
             "pr" => m.pr = Some(scalar()?),
@@ -83,7 +83,7 @@ pub fn parse(text: &str) -> Result<Vec<MtlMaterial>, String> {
             "map_d" => m.map_d = Some(parse_map(&rest).ok_or_else(|| err("missing file name"))?),
             "map_bump" | "bump" => m.map_bump = Some(parse_map(&rest).ok_or_else(|| err("missing file name"))?),
             "norm" | "map_norm" | "map_kn" => {
-                m.map_norm = Some(parse_map(&rest).ok_or_else(|| err("missing file name"))?)
+                m.map_norm = Some(parse_map(&rest).ok_or_else(|| err("missing file name"))?);
             }
             "map_pr" => m.map_pr = Some(parse_map(&rest).ok_or_else(|| err("missing file name"))?),
             "map_pm" => m.map_pm = Some(parse_map(&rest).ok_or_else(|| err("missing file name"))?),

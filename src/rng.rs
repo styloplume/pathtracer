@@ -18,7 +18,7 @@ impl Rng {
     #[inline]
     pub fn next_u32(&mut self) -> u32 {
         let old = self.state;
-        self.state = old.wrapping_mul(6364136223846793005).wrapping_add(self.inc);
+        self.state = old.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(self.inc);
         let xorshifted = (((old >> 18) ^ old) >> 27) as u32;
         let rot = (old >> 59) as u32;
         xorshifted.rotate_right(rot)
@@ -31,7 +31,7 @@ impl Rng {
     }
 }
 
-/// SplitMix64 finalizer: a good 64-bit integer hash for seeding.
+/// `SplitMix64` finalizer: a good 64-bit integer hash for seeding.
 #[inline]
 pub fn hash64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);

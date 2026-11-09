@@ -273,7 +273,7 @@ impl Scene {
                 let lum = mat.emission_mean().luminance();
                 if lum > 0.0 && area > 0.0 {
                     self.light_prims.push(prim);
-                    weights.push((lum * area) as f64);
+                    weights.push(f64::from(lum * area));
                 }
             }
         }
@@ -328,8 +328,8 @@ impl Scene {
         if a <= 0.0 {
             return false;
         }
-        let key = (p.x.to_bits() as u64) ^ ((p.y.to_bits() as u64) << 21) ^ ((p.z.to_bits() as u64) << 42);
-        let u = (hash64(key ^ h.prim as u64) >> 40) as f32 * (1.0 / (1u64 << 24) as f32);
+        let key = u64::from(p.x.to_bits()) ^ (u64::from(p.y.to_bits()) << 21) ^ (u64::from(p.z.to_bits()) << 42);
+        let u = (hash64(key ^ u64::from(h.prim)) >> 40) as f32 * (1.0 / (1u64 << 24) as f32);
         u < a
     }
 
@@ -348,11 +348,7 @@ impl Scene {
 
     #[inline]
     fn tri_uvs(&self, t: &Triangle) -> [[f32; 2]; 3] {
-        if t.has_uvs() {
-            t.uv.map(|i| self.uvs[i as usize])
-        } else {
-            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
-        }
+        if t.has_uvs() { t.uv.map(|i| self.uvs[i as usize]) } else { [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]] }
     }
 
     fn traverse(&self, ray: &Ray, t_max: f32, any_hit: bool) -> Option<Hit> {
@@ -433,7 +429,7 @@ impl Scene {
         let n = |i: usize| self.normals[tri.n[i] as usize];
         let ns = n(0) * b0 + n(1) * b1 + n(2) * b2;
         let len = ns.length();
-        if !(len > 0.0) {
+        if len.is_nan() || len <= 0.0 {
             return (ng, ng);
         }
         let ns = ns * (1.0 / len);
@@ -453,7 +449,10 @@ impl Scene {
             let p = p0 * b0 + p1 * hit.b1 + p2 * hit.b2;
             let (ng, ns) = self.tri_normals(tri, hit.b1, hit.b2);
             let t = self.tri_uvs(tri);
-            let uv = [t[0][0] * b0 + t[1][0] * hit.b1 + t[2][0] * hit.b2, t[0][1] * b0 + t[1][1] * hit.b1 + t[2][1] * hit.b2];
+            let uv = [
+                t[0][0] * b0 + t[1][0] * hit.b1 + t[2][0] * hit.b2,
+                t[0][1] * b0 + t[1][1] * hit.b1 + t[2][1] * hit.b2,
+            ];
             // Solve [dp02 dp12] = [dpdu dpdv] * [duv02 duv12] (pbrt).
             let (d02, d12) = ([t[0][0] - t[2][0], t[0][1] - t[2][1]], [t[1][0] - t[2][0], t[1][1] - t[2][1]]);
             let (dp02, dp12) = (p0 - p2, p1 - p2);

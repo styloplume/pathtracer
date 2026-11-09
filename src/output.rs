@@ -102,7 +102,7 @@ impl OutputSettings {
 
     /// Base path (no extension) with placeholders filled in.
     pub fn base_path(&self, scene_stem: &str, default: &str) -> PathBuf {
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let template = self.path.as_deref().unwrap_or(default);
         PathBuf::from(template.replace("{scene}", scene_stem).replace("{time}", &secs.to_string()))
     }
@@ -128,7 +128,7 @@ pub struct Snapshot<'a> {
 
 /// Writes all configured outputs; returns the files written.
 pub fn save(
-    snap: &Snapshot,
+    snap: &Snapshot<'_>,
     settings: &OutputSettings,
     base: &Path,
     enc: &Encoder,

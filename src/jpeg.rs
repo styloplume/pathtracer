@@ -8,8 +8,8 @@ use std::f32::consts::PI;
 /// Zigzag index -> natural (row-major) index.
 const ZIGZAG: [usize; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21,
-    28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61,
-    54, 47, 55, 62, 63,
+    28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54,
+    47, 55, 62, 63,
 ];
 
 #[derive(Clone, Default)]
@@ -26,7 +26,7 @@ impl Huffman {
         let mut h = Huffman { maxcode: [-1; 17], vals, ..Default::default() };
         let (mut code, mut k) = (0i32, 0i32);
         for len in 1..=16 {
-            let n = counts[len - 1] as i32;
+            let n = i32::from(counts[len - 1]);
             if n > 0 {
                 h.valptr[len] = k;
                 h.mincode[len] = code;
@@ -77,7 +77,7 @@ impl Bits<'_> {
                     self.pos += 1;
                 }
             }
-            self.acc |= (b as u32) << (24 - self.n);
+            self.acc |= u32::from(b) << (24 - self.n);
             self.n += 8;
         }
     }
@@ -116,7 +116,7 @@ impl Bits<'_> {
         let v = self.bits(s) as i32;
         if v < 1 << (s - 1) { v - (1 << s) + 1 } else { v }
     }
-    /// Drops buffered bits and skips an RSTn marker if one follows.
+    /// Drops buffered bits and skips an `RSTn` marker if one follows.
     fn restart(&mut self) {
         self.acc = 0;
         self.n = 0;
@@ -164,6 +164,7 @@ fn idct_block(coef: &[f32; 64], t: &[[f32; 8]; 8], out: &mut [u8], stride: usize
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one flat match over JPEG markers reads best in one place")]
 pub fn decode(data: &[u8]) -> Result<RawImage, String> {
     let mut qt = [[0u16; 64]; 4];
     let mut dc_tables: [Huffman; 4] = Default::default();
@@ -253,7 +254,11 @@ pub fn decode(data: &[u8]) -> Result<RawImage, String> {
                         return Err("bad Huffman table id".into());
                     }
                     let t = Huffman::new(&counts, vals);
-                    if tc == 0 { dc_tables[th] = t } else { ac_tables[th] = t }
+                    if tc == 0 {
+                        dc_tables[th] = t;
+                    } else {
+                        ac_tables[th] = t;
+                    }
                     p += 17 + total;
                 }
             }
@@ -266,7 +271,7 @@ pub fn decode(data: &[u8]) -> Result<RawImage, String> {
                     }
                     for (k, q) in qt[tq].iter_mut().enumerate() {
                         *q = if pq == 0 {
-                            *seg.get(p + 1 + k).ok_or("truncated DQT")? as u16
+                            u16::from(*seg.get(p + 1 + k).ok_or("truncated DQT")?)
                         } else {
                             let b = seg.get(p + 1 + 2 * k..p + 3 + 2 * k).ok_or("truncated DQT")?;
                             u16::from_be_bytes([b[0], b[1]])
@@ -320,7 +325,7 @@ pub fn decode(data: &[u8]) -> Result<RawImage, String> {
     let mut out = vec![0u8; width * height * channels];
     let sample = |c: &Component, x: usize, y: usize| -> f32 {
         if c.h == hmax && c.v == vmax {
-            return c.plane[y * c.stride + x] as f32;
+            return f32::from(c.plane[y * c.stride + x]);
         }
         let (cw, ch) = ((width * c.h).div_ceil(hmax), (height * c.v).div_ceil(vmax));
         let fx = ((x as f32 + 0.5) * c.h as f32 / hmax as f32 - 0.5).clamp(0.0, (cw - 1) as f32);
@@ -328,7 +333,7 @@ pub fn decode(data: &[u8]) -> Result<RawImage, String> {
         let (x0, y0) = (fx as usize, fy as usize);
         let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
         let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-        let p = |x: usize, y: usize| c.plane[y * c.stride + x] as f32;
+        let p = |x: usize, y: usize| f32::from(c.plane[y * c.stride + x]);
         (p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx) * (1.0 - ty) + (p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx) * ty
     };
     for y in 0..height {
@@ -361,7 +366,7 @@ fn decode_scan(
     start: usize,
     comps: &mut [Component],
     scan: &[usize],
-    (dc, ac, qt, idct): Tables,
+    (dc, ac, qt, idct): Tables<'_>,
     (width, height, hmax, vmax): (usize, usize, usize, usize),
     restart_interval: usize,
 ) -> Result<usize, String> {
@@ -395,16 +400,16 @@ fn decode_scan(
                     for bx in 0..bh {
                         coef.fill(0.0);
                         let q = &qt[c.tq];
-                        let t = bits.decode(&dc[c.td])? as u32;
+                        let t = u32::from(bits.decode(&dc[c.td])?);
                         if t > 11 {
                             return Err("bad DC coefficient".into());
                         }
                         c.dc_pred += bits.receive_extend(t);
-                        coef[0] = (c.dc_pred * q[0] as i32) as f32;
+                        coef[0] = (c.dc_pred * i32::from(q[0])) as f32;
                         let mut k = 1;
                         while k < 64 {
                             let rs = bits.decode(&ac[c.ta])?;
-                            let (r, s) = ((rs >> 4) as usize, (rs & 15) as u32);
+                            let (r, s) = ((rs >> 4) as usize, u32::from(rs & 15));
                             if s == 0 {
                                 if r == 15 {
                                     k += 16;
@@ -416,7 +421,7 @@ fn decode_scan(
                             if k > 63 {
                                 return Err("bad AC run length".into());
                             }
-                            coef[ZIGZAG[k]] = (bits.receive_extend(s) * q[k] as i32) as f32;
+                            coef[ZIGZAG[k]] = (bits.receive_extend(s) * i32::from(q[k])) as f32;
                             k += 1;
                         }
                         let (x, y) = if single { (mx * 8, my * 8) } else { ((mx * c.h + bx) * 8, (my * c.v + by) * 8) };
@@ -452,7 +457,7 @@ mod tests {
         let (mut sum, mut max) = (0u64, 0u8);
         for (a, b) in px.iter().zip(reference.iter()) {
             let d = a.abs_diff(*b);
-            sum += d as u64;
+            sum += u64::from(d);
             max = max.max(d);
         }
         let mean = sum as f64 / px.len() as f64;

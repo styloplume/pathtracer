@@ -29,7 +29,7 @@ pub fn adler32(data: &[u8]) -> u32 {
     let (mut a, mut b) = (1u32, 0u32);
     for chunk in data.chunks(5552) {
         for &x in chunk {
-            a += x as u32;
+            a += u32::from(x);
             b += a;
         }
         a %= 65521;
@@ -47,13 +47,12 @@ pub fn zlib_compress(data: &[u8]) -> Vec<u8> {
 }
 
 /// Inverse of [`zlib_compress`]; accepts any valid zlib stream without a preset dictionary.
-#[allow(dead_code)] // used by tests now; image loading (M3) will use it too
 pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
     if data.len() < 6 {
         return Err("zlib stream too short".into());
     }
     let (cmf, flg) = (data[0], data[1]);
-    if cmf & 0x0F != 8 || !((cmf as u16) << 8 | flg as u16).is_multiple_of(31) || flg & 0x20 != 0 {
+    if cmf & 0x0F != 8 || !(u16::from(cmf) << 8 | u16::from(flg)).is_multiple_of(31) || flg & 0x20 != 0 {
         return Err("invalid zlib header".into());
     }
     let out = inflate(&data[2..data.len() - 4])?;
@@ -75,7 +74,7 @@ struct BitWriter {
 impl BitWriter {
     #[inline]
     fn put(&mut self, v: u32, bits: u32) {
-        self.acc |= (v as u64) << self.n;
+        self.acc |= u64::from(v) << self.n;
         self.n += bits;
         while self.n >= 8 {
             self.out.push(self.acc as u8);
@@ -113,7 +112,7 @@ impl Matcher<'_> {
     #[inline]
     fn hash(&self, i: usize) -> usize {
         let d = self.data;
-        let v = d[i] as u32 | (d[i + 1] as u32) << 8 | (d[i + 2] as u32) << 16;
+        let v = u32::from(d[i]) | u32::from(d[i + 1]) << 8 | u32::from(d[i + 2]) << 16;
         (v.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
     }
 
@@ -166,7 +165,7 @@ impl Matcher<'_> {
 fn lz77(data: &[u8]) -> Vec<Token> {
     let mut m = Matcher { data, head: vec![NONE; 1 << HASH_BITS], prev: vec![NONE; WINDOW] };
     let mut toks = Vec::with_capacity(data.len() / 3 + 16);
-    let lit = |b: u8| Token { len: b as u16, dist: 0 };
+    let lit = |b: u8| Token { len: u16::from(b), dist: 0 };
     let mut i = 0;
     while i < data.len() {
         let (len, dist) = m.find(i);
@@ -207,7 +206,7 @@ fn dist_code(dist: usize) -> usize {
 fn huffman_lengths(freq: &[u32], limit: u32) -> Vec<u8> {
     let mut lens = vec![0u8; freq.len()];
     let mut leaves: Vec<(u64, u16)> =
-        freq.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, &f)| (f as u64, i as u16)).collect();
+        freq.iter().enumerate().filter(|&(_, &f)| f > 0).map(|(i, &f)| (u64::from(f), i as u16)).collect();
     match leaves.len() {
         0 => return lens,
         1 => {
@@ -361,7 +360,8 @@ impl DynamicHeader {
     }
 
     fn bits(&self) -> u64 {
-        let rle: u64 = self.rle.iter().map(|&(s, _)| (self.cl[s as usize] as u32 + CL_EXTRA[s as usize]) as u64).sum();
+        let rle: u64 =
+            self.rle.iter().map(|&(s, _)| u64::from(u32::from(self.cl[s as usize]) + CL_EXTRA[s as usize])).sum();
         14 + 3 * self.hclen as u64 + rle
     }
 
@@ -370,13 +370,13 @@ impl DynamicHeader {
         bw.put((self.hdist - 1) as u32, 5);
         bw.put((self.hclen - 4) as u32, 4);
         for &s in &CL_ORDER[..self.hclen] {
-            bw.put(self.cl[s] as u32, 3);
+            bw.put(u32::from(self.cl[s]), 3);
         }
         let codes = canonical_codes(&self.cl);
         for &(s, extra) in &self.rle {
-            bw.put(codes[s as usize] as u32, self.cl[s as usize] as u32);
+            bw.put(u32::from(codes[s as usize]), u32::from(self.cl[s as usize]));
             if CL_EXTRA[s as usize] > 0 {
-                bw.put(extra as u32, CL_EXTRA[s as usize]);
+                bw.put(u32::from(extra), CL_EXTRA[s as usize]);
             }
         }
     }
@@ -385,11 +385,11 @@ impl DynamicHeader {
 fn payload_bits(lf: &[u32; 286], df: &[u32; 30], ll: &[u8], dl: &[u8]) -> u64 {
     let mut bits = 0u64;
     for (s, &f) in lf.iter().enumerate() {
-        let extra = if s > 256 { LEN_EXTRA[s - 257] as u64 } else { 0 };
-        bits += f as u64 * (ll[s] as u64 + extra);
+        let extra = if s > 256 { u64::from(LEN_EXTRA[s - 257]) } else { 0 };
+        bits += u64::from(f) * (u64::from(ll[s]) + extra);
     }
     for (s, &f) in df.iter().enumerate() {
-        bits += f as u64 * (dl[s] as u64 + DIST_EXTRA[s] as u64);
+        bits += u64::from(f) * (u64::from(dl[s]) + u64::from(DIST_EXTRA[s]));
     }
     bits
 }
@@ -398,24 +398,24 @@ fn write_tokens(bw: &mut BitWriter, toks: &[Token], ll: &[u8], dl: &[u8]) {
     let (lc, dc) = (canonical_codes(ll), canonical_codes(dl));
     for t in toks {
         if t.dist == 0 {
-            bw.put(lc[t.len as usize] as u32, ll[t.len as usize] as u32);
+            bw.put(u32::from(lc[t.len as usize]), u32::from(ll[t.len as usize]));
         } else {
             let (len, dist) = (t.len as usize, t.dist as usize);
             let c = len_code(len);
-            bw.put(lc[257 + c] as u32, ll[257 + c] as u32);
-            bw.put((len - LEN_BASE[c] as usize) as u32, LEN_EXTRA[c] as u32);
+            bw.put(u32::from(lc[257 + c]), u32::from(ll[257 + c]));
+            bw.put((len - LEN_BASE[c] as usize) as u32, u32::from(LEN_EXTRA[c]));
             let d = dist_code(dist);
-            bw.put(dc[d] as u32, dl[d] as u32);
-            bw.put((dist - DIST_BASE[d] as usize) as u32, DIST_EXTRA[d] as u32);
+            bw.put(u32::from(dc[d]), u32::from(dl[d]));
+            bw.put((dist - DIST_BASE[d] as usize) as u32, u32::from(DIST_EXTRA[d]));
         }
     }
-    bw.put(lc[256] as u32, ll[256] as u32);
+    bw.put(u32::from(lc[256]), u32::from(ll[256]));
 }
 
 fn write_stored(bw: &mut BitWriter, raw: &[u8], last: bool) {
     let chunks: Vec<&[u8]> = if raw.is_empty() { vec![raw] } else { raw.chunks(65535).collect() };
     for (i, c) in chunks.iter().enumerate() {
-        bw.put((last && i + 1 == chunks.len()) as u32, 1);
+        bw.put(u32::from(last && i + 1 == chunks.len()), 1);
         bw.put(0, 2);
         bw.align();
         let len = c.len() as u16;
@@ -447,11 +447,11 @@ fn write_block(bw: &mut BitWriter, toks: &[Token], raw: &[u8], last: bool) {
     if stored_bits <= dyn_bits.min(fixed_bits) {
         write_stored(bw, raw, last);
     } else if fixed_bits <= dyn_bits {
-        bw.put(last as u32, 1);
+        bw.put(u32::from(last), 1);
         bw.put(1, 2);
         write_tokens(bw, toks, &fll, &fdl);
     } else {
-        bw.put(last as u32, 1);
+        bw.put(u32::from(last), 1);
         bw.put(2, 2);
         dynamic.write(bw);
         write_tokens(bw, toks, &dynamic.ll, &dynamic.dist);
@@ -492,7 +492,7 @@ impl BitReader<'_> {
         while self.n < need {
             let b = *self.data.get(self.pos).ok_or("unexpected end of deflate stream")?;
             self.pos += 1;
-            self.acc |= (b as u32) << self.n;
+            self.acc |= u32::from(b) << self.n;
             self.n += 8;
         }
         let v = self.acc & ((1u64 << need) - 1) as u32;
@@ -529,11 +529,11 @@ impl Decoder {
         Decoder { count, symbol }
     }
 
-    fn decode(&self, br: &mut BitReader) -> Result<u16, String> {
+    fn decode(&self, br: &mut BitReader<'_>) -> Result<u16, String> {
         let (mut code, mut first, mut index) = (0i32, 0i32, 0i32);
         for len in 1..16 {
             code |= br.bits(1)? as i32;
-            let count = self.count[len] as i32;
+            let count = i32::from(self.count[len]);
             if code - count < first {
                 return Ok(self.symbol[(index + code - first) as usize]);
             }
@@ -545,7 +545,6 @@ impl Decoder {
     }
 }
 
-#[allow(dead_code)]
 pub fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut br = BitReader { data, pos: 0, acc: 0, n: 0 };
     let mut out = Vec::new();
@@ -601,7 +600,7 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn inflate_block(br: &mut BitReader, out: &mut Vec<u8>, ll: &Decoder, dl: &Decoder) -> Result<(), String> {
+fn inflate_block(br: &mut BitReader<'_>, out: &mut Vec<u8>, ll: &Decoder, dl: &Decoder) -> Result<(), String> {
     loop {
         let s = ll.decode(br)? as usize;
         match s {
@@ -612,12 +611,12 @@ fn inflate_block(br: &mut BitReader, out: &mut Vec<u8>, ll: &Decoder, dl: &Decod
                 if c >= 29 {
                     return Err("invalid length code".into());
                 }
-                let len = LEN_BASE[c] as usize + br.bits(LEN_EXTRA[c] as u32)? as usize;
+                let len = LEN_BASE[c] as usize + br.bits(u32::from(LEN_EXTRA[c]))? as usize;
                 let d = dl.decode(br)? as usize;
                 if d >= 30 {
                     return Err("invalid distance code".into());
                 }
-                let dist = DIST_BASE[d] as usize + br.bits(DIST_EXTRA[d] as u32)? as usize;
+                let dist = DIST_BASE[d] as usize + br.bits(u32::from(DIST_EXTRA[d]))? as usize;
                 if dist > out.len() {
                     return Err("distance too far back".into());
                 }
@@ -657,7 +656,7 @@ mod tests {
         assert!(roundtrip(&skewed) < 60_000);
         // Text-like data with repeats beyond one block.
         let text: Vec<u8> =
-            (0..300_000u32).map(|i| b"the quick brown fox "[(i * 7 % 20) as usize] ^ (i % 3 == 0) as u8).collect();
+            (0..300_000u32).map(|i| b"the quick brown fox "[(i * 7 % 20) as usize] ^ u8::from(i % 3 == 0)).collect();
         roundtrip(&text);
     }
 
@@ -671,7 +670,7 @@ mod tests {
         }
         let lens = huffman_lengths(&f, 15);
         assert!(lens.iter().all(|&l| (1..=15).contains(&l)));
-        let kraft: f64 = lens.iter().map(|&l| 0.5f64.powi(l as i32)).sum();
+        let kraft: f64 = lens.iter().map(|&l| 0.5f64.powi(i32::from(l))).sum();
         assert!((kraft - 1.0).abs() < 1e-12, "code must be complete, kraft {kraft}");
     }
 }

@@ -13,7 +13,7 @@ pub struct CameraDesc {
     pub fov: f32,
     /// Lens diameter; 0 means a pinhole camera.
     pub aperture: f32,
-    /// Distance to the plane in perfect focus; defaults to |look_at - position|.
+    /// Distance to the plane in perfect focus; defaults to |`look_at` - position|.
     pub focus_distance: Option<f32>,
 }
 
