@@ -102,6 +102,8 @@ pub struct Scene {
     pub normals: Vec<Vec3>,
     pub triangles: Vec<Triangle>,
     pub spheres: Vec<Sphere>,
+    /// Files the scene was loaded from (scene file first, then meshes); watched for hot reload.
+    pub files: Vec<std::path::PathBuf>,
     bvh: Bvh,
     light_prims: Vec<u32>,
     light_cdf: Vec<f32>,
@@ -131,6 +133,7 @@ impl Scene {
             normals,
             triangles,
             spheres,
+            files: Vec::new(),
             bvh: Bvh { nodes: Vec::new(), indices: Vec::new() },
             light_prims: Vec::new(),
             light_cdf: Vec::new(),
@@ -144,6 +147,11 @@ impl Scene {
 
     pub fn num_prims(&self) -> usize {
         self.triangles.len() + self.spheres.len()
+    }
+
+    /// World-space bounds of all geometry (`Aabb::EMPTY` for an empty scene).
+    pub fn bounds(&self) -> Aabb {
+        self.bvh.nodes.first().map_or(Aabb::EMPTY, |n| n.bounds)
     }
 
     pub fn stats(&self) -> String {

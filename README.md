@@ -7,8 +7,30 @@ cargo run --release -- scenes/cornell.toml               # interactive window
 cargo run --release -- scenes/spheres.toml --headless    # render to renders/spheres.png
 ```
 
-Options: `--headless`, `-o FILE`, `--spp N`, `--size WxH`, `--threads N`.
-Window keys: `Esc` quit · `S` save PNG · `R` restart. Resizing the window restarts the render at the new resolution.
+Options: `--headless`, `-o FILE`, `--spp N`, `--size WxH`, `--threads N`, `--scale N` (render at 1/N window resolution).
+
+Window controls (`F1` shows them in the window):
+
+| Input | Action |
+|---|---|
+| Left drag | orbit around the target |
+| Shift + left drag / middle drag | pan |
+| Right drag | look around (camera stays in place) |
+| Wheel / Shift + wheel | dolly / change field of view |
+| `W A S D`, arrows, `Q E` | fly (hold `Shift` for 4× speed) |
+| `Home` | reset to the scene's camera |
+| `+` / `-` / `0` | exposure ±½ stop / reset (no re-render) |
+| `T` | cycle tonemapper (no re-render) |
+| `1`–`4` | resolution scale 1/1 … 1/4 |
+| `Space` | pause / resume |
+| `R` | restart render |
+| `H` | toggle HUD (resolution, spp, time, samples/s) |
+| `Ctrl+S` | save PNG |
+| `Esc` | quit |
+
+Any camera change restarts the progressive render. Rows appear as they finish, so long passes are visible
+while they run. Saving the scene file (or a mesh it references) reloads it automatically. Interactive camera,
+exposure and tonemap changes are kept unless that part of the file changed.
 
 ## Features
 
@@ -24,8 +46,10 @@ Window keys: `Esc` quit · `S` save PNG · `R` restart. Resizing the window rest
 
 | File | Purpose |
 |---|---|
-| `src/main.rs` | CLI, UI thread / render thread wiring |
-| `src/renderer.rs` | progressive coarse-to-fine scheduling, threading, display resolve |
+| `src/main.rs` | CLI, headless rendering |
+| `src/app.rs` | windowed front end: UI thread, render thread, input, HUD, hot reload |
+| `src/controls.rs` | orbit / pan / look / fly camera controller |
+| `src/renderer.rs` | progressive coarse-to-fine scheduling, threading, progress callbacks, display resolve |
 | `src/integrator.rs` | path tracing with NEE + MIS |
 | `src/material.rs` | BSDFs |
 | `src/scene.rs` | scene data, BVH traversal, light sampling |

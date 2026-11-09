@@ -27,16 +27,16 @@ Legend: `[x]` done · `[ ]` planned. Order within a milestone is a suggestion, n
 - [x] CLI: headless mode, output path, spp / size / thread overrides
 - [x] Unit tests for parsers, intersections, BSDF sampling consistency, checksums
 
-## M1 — Interactivity & UX
+## M1 — Interactivity & UX ✅
 
-- [ ] Camera controls: orbit / pan / zoom with mouse, WASD fly mode; restart render on move
-- [ ] Mouse + modifier input events in the platform layer
-- [ ] Intra-pass display updates (show rows as they finish during long passes)
-- [ ] Hot-reload: watch the scene file and reload on save
-- [ ] Runtime toggles: exposure / tonemap keys without re-rendering (re-resolve only)
-- [ ] On-screen overlay or console HUD: spp, samples/s, render time
-- [ ] Pause / resume rendering
-- [ ] Optional resolution scale (render below window res, upscale) for heavy scenes
+- [x] Camera controls: orbit / pan / zoom with mouse, WASD fly mode; restart render on move
+- [x] Mouse + modifier input events in the platform layer
+- [x] Intra-pass display updates (show rows as they finish during long passes)
+- [x] Hot-reload: watch the scene file and reload on save
+- [x] Runtime toggles: exposure / tonemap keys without re-rendering (re-resolve only)
+- [x] On-screen overlay or console HUD: spp, samples/s, render time
+- [x] Pause / resume rendering
+- [x] Optional resolution scale (render below window res, upscale) for heavy scenes
 
 ## M2 — Image pipeline
 

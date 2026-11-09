@@ -9,7 +9,7 @@ use crate::mesh;
 use crate::scene::{Background, RenderSettings, Scene};
 use crate::toml::{self, Table, Value};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn load_scene(path: &Path) -> Result<Scene, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
@@ -44,7 +44,11 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
     if b.triangles.is_empty() && b.spheres.is_empty() {
         eprintln!("warning: scene contains no objects");
     }
-    Ok(Scene::new(settings, camera, background, b.materials, b.positions, b.normals, b.triangles, b.spheres))
+    let mut files = vec![path.to_path_buf()];
+    files.append(&mut b.files);
+    let mut scene = Scene::new(settings, camera, background, b.materials, b.positions, b.normals, b.triangles, b.spheres);
+    scene.files = files;
+    Ok(scene)
 }
 
 // ------------------------------------------------------------------ value helpers
@@ -209,6 +213,7 @@ struct Builder {
     normals: Vec<Vec3>,
     triangles: Vec<Triangle>,
     spheres: Vec<Sphere>,
+    files: Vec<PathBuf>,
 }
 
 impl Builder {
@@ -270,7 +275,11 @@ impl Builder {
             }
             "mesh" => {
                 let file = str_opt(t, "file", ctx)?.ok_or_else(|| format!("{ctx}: missing 'file'"))?;
-                let data = mesh::load(&base_dir.join(file))?;
+                let file = base_dir.join(file);
+                if !self.files.contains(&file) {
+                    self.files.push(file.clone());
+                }
+                let data = mesh::load(&file)?;
                 let xf = parse_transform(t, ctx)?;
                 self.add_mesh(&data, &xf, mat, t, ctx)?;
             }

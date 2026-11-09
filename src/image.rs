@@ -23,6 +23,23 @@ impl Tonemap {
         }
     }
 
+    pub fn name(self) -> &'static str {
+        match self {
+            Tonemap::None => "clamp",
+            Tonemap::Reinhard => "Reinhard",
+            Tonemap::Aces => "ACES",
+        }
+    }
+
+    /// Cycles through the available operators (for the interactive toggle).
+    pub fn next(self) -> Tonemap {
+        match self {
+            Tonemap::Aces => Tonemap::Reinhard,
+            Tonemap::Reinhard => Tonemap::None,
+            Tonemap::None => Tonemap::Aces,
+        }
+    }
+
     #[inline]
     fn apply(self, x: f32) -> f32 {
         let x = x.max(0.0);
@@ -40,11 +57,31 @@ fn srgb_encode(c: f32) -> f32 {
     if c <= 0.003_130_8 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
-/// Converts linear radiance to a packed 0x00RRGGBB display pixel.
-#[inline]
-pub fn encode_pixel(c: Vec3, exposure_scale: f32, tm: Tonemap) -> u32 {
-    let q = |v: f32| (srgb_encode(tm.apply(v * exposure_scale)) * 255.0 + 0.5) as u32;
-    (q(c.x) << 16) | (q(c.y) << 8) | q(c.z)
+const SRGB_LUT_SIZE: usize = 1 << 14;
+
+/// Converts linear radiance to packed 0x00RRGGBB display pixels: exposure, tone
+/// mapping, then sRGB encoding through a lookup table (cheap enough to re-resolve
+/// the whole image interactively when exposure or tonemap change).
+pub struct Encoder {
+    scale: f32,
+    tm: Tonemap,
+    lut: Vec<u8>,
+}
+
+impl Encoder {
+    pub fn new(exposure: f32, tm: Tonemap) -> Encoder {
+        let n = SRGB_LUT_SIZE - 1;
+        let lut = (0..SRGB_LUT_SIZE).map(|i| (srgb_encode(i as f32 / n as f32) * 255.0 + 0.5) as u8).collect();
+        Encoder { scale: exposure.exp2(), tm, lut }
+    }
+
+    #[inline]
+    pub fn encode(&self, c: Vec3) -> u32 {
+        let n = (SRGB_LUT_SIZE - 1) as f32;
+        // NaN and negatives map to index 0 (`as usize` saturates).
+        let q = |v: f32| self.lut[((self.tm.apply(v * self.scale).min(1.0) * n + 0.5) as usize).min(SRGB_LUT_SIZE - 1)] as u32;
+        (q(c.x) << 16) | (q(c.y) << 8) | q(c.z)
+    }
 }
 
 pub fn packed_to_rgb(px: &[u32]) -> Vec<u8> {

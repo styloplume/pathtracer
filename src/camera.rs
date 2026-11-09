@@ -4,7 +4,7 @@ use crate::math::{Ray, Vec3};
 use crate::rng::Rng;
 use crate::sampling::concentric_disk;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CameraDesc {
     pub position: Vec3,
     pub look_at: Vec3,
