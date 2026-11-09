@@ -6,15 +6,19 @@ use crate::math::Vec3;
 pub struct MeshData {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
+    pub uvs: Vec<[f32; 2]>,
     pub triangles: Vec<MeshTriangle>,
     /// Material names referenced by triangles (`usemtl` in OBJ). Index 0 is "" (none).
     pub groups: Vec<String>,
+    /// Material libraries referenced by the file (`mtllib` in OBJ), as written.
+    pub mtllibs: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct MeshTriangle {
     pub v: [u32; 3],
     pub n: Option<[u32; 3]>,
+    pub uv: Option<[u32; 3]>,
     pub group: u32,
 }
 
@@ -32,7 +36,7 @@ pub fn load(path: &std::path::Path) -> Result<MeshData, String> {
 pub fn load_obj(text: &str) -> Result<MeshData, String> {
     let mut m = MeshData { groups: vec![String::new()], ..Default::default() };
     let mut group = 0u32;
-    let mut corners: Vec<(u32, Option<u32>)> = Vec::new();
+    let mut corners: Vec<(u32, Option<u32>, Option<u32>)> = Vec::new();
     for (lineno, line) in text.lines().enumerate() {
         let err = |msg: String| format!("line {}: {msg}", lineno + 1);
         let line = line.split('#').next().unwrap_or("").trim();
@@ -40,6 +44,12 @@ pub fn load_obj(text: &str) -> Result<MeshData, String> {
         match it.next() {
             Some("v") => m.positions.push(parse_vec3(&mut it).ok_or_else(|| err("malformed vertex".into()))?),
             Some("vn") => m.normals.push(parse_vec3(&mut it).ok_or_else(|| err("malformed normal".into()))?),
+            Some("vt") => {
+                let u = it.next().and_then(|s| s.parse::<f32>().ok()).ok_or_else(|| err("malformed uv".into()))?;
+                let v = it.next().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+                m.uvs.push([u, v]);
+            }
+            Some("mtllib") => m.mtllibs.extend(it.map(str::to_owned)),
             Some("usemtl") => {
                 let name = it.collect::<Vec<_>>().join(" ");
                 group = match m.groups.iter().position(|g| *g == name) {
@@ -55,27 +65,32 @@ pub fn load_obj(text: &str) -> Result<MeshData, String> {
                 for tok in it {
                     let mut parts = tok.split('/');
                     let v = resolve_obj_index(parts.next().unwrap_or(""), m.positions.len()).map_err(&err)?;
-                    let _vt = parts.next();
+                    let t = match parts.next() {
+                        Some(s) if !s.is_empty() => Some(resolve_obj_index(s, m.uvs.len()).map_err(&err)?),
+                        _ => None,
+                    };
                     let n = match parts.next() {
                         Some(s) if !s.is_empty() => Some(resolve_obj_index(s, m.normals.len()).map_err(&err)?),
                         _ => None,
                     };
-                    corners.push((v, n));
+                    corners.push((v, n, t));
                 }
                 if corners.len() < 3 {
                     return Err(err("face with fewer than 3 vertices".into()));
                 }
                 let all_normals = corners.iter().all(|c| c.1.is_some());
+                let all_uvs = corners.iter().all(|c| c.2.is_some());
                 for i in 1..corners.len() - 1 {
                     let (a, b, c) = (corners[0], corners[i], corners[i + 1]);
                     m.triangles.push(MeshTriangle {
                         v: [a.0, b.0, c.0],
                         n: all_normals.then(|| [a.1.unwrap(), b.1.unwrap(), c.1.unwrap()]),
+                        uv: all_uvs.then(|| [a.2.unwrap(), b.2.unwrap(), c.2.unwrap()]),
                         group,
                     });
                 }
             }
-            _ => {} // vt, o, g, s, mtllib, ... are ignored for now
+            _ => {} // o, g, s, ... are ignored
         }
     }
     Ok(m)
@@ -249,15 +264,20 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
     let mut r = Reader { data: data.get(body..).unwrap_or(&[]), pos: 0, format };
     let mut m = MeshData { groups: vec![String::new()], ..Default::default() };
     let mut has_normals = false;
+    let mut has_uvs = false;
     let mut list = Vec::new();
     for el in &elements {
         let find = |n: &str| el.props.iter().position(|p| p.0 == n);
+        let any = |names: &[&str]| names.iter().find_map(|n| find(n));
         let (px, py, pz) = (find("x"), find("y"), find("z"));
         let (nx, ny, nz) = (find("nx"), find("ny"), find("nz"));
+        let tu = any(&["u", "s", "texture_u", "texture_s"]);
+        let tv = any(&["v", "t", "texture_v", "texture_t"]);
         let face_prop = find("vertex_indices").or_else(|| find("vertex_index"));
         let is_vertex = el.name == "vertex";
         if is_vertex {
             has_normals = nx.is_some() && ny.is_some() && nz.is_some();
+            has_uvs = tu.is_some() && tv.is_some();
         }
         let mut vals = vec![0.0f64; el.props.len()];
         for _ in 0..el.count {
@@ -276,7 +296,7 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
                             }
                             for k in 1..n - 1 {
                                 let v = [list[0] as u32, list[k] as u32, list[k + 1] as u32];
-                                m.triangles.push(MeshTriangle { v, n: None, group: 0 });
+                                m.triangles.push(MeshTriangle { v, n: None, uv: None, group: 0 });
                             }
                         }
                     }
@@ -287,6 +307,9 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
                 m.positions.push(Vec3::new(g(px), g(py), g(pz)));
                 if has_normals {
                     m.normals.push(Vec3::new(g(nx), g(ny), g(nz)));
+                }
+                if has_uvs {
+                    m.uvs.push([g(tu), g(tv)]);
                 }
             }
         }
@@ -299,6 +322,9 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
         if has_normals {
             t.n = Some(t.v);
         }
+        if has_uvs {
+            t.uv = Some(t.v);
+        }
     }
     Ok(m)
 }
@@ -309,12 +335,27 @@ mod tests {
 
     #[test]
     fn obj_quads_and_negative_indices() {
-        let src = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvn 0 0 1\nusemtl red\nf -4//1 -3//1 -2//1 -1//1\n";
+        let src = "mtllib a.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvn 0 0 1\nusemtl red\nf -4//1 -3//1 -2//1 -1//1\n";
         let m = load_obj(src).unwrap();
         assert_eq!(m.triangles.len(), 2);
         assert_eq!(m.triangles[1].v, [0, 2, 3]);
         assert_eq!(m.triangles[0].n, Some([0, 0, 0]));
+        assert_eq!(m.triangles[0].uv, None);
         assert_eq!(m.groups[m.triangles[0].group as usize], "red");
+        assert_eq!(m.mtllibs, ["a.mtl"]);
+    }
+
+    #[test]
+    fn obj_texture_coordinates() {
+        let src = "v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1 0\nf 1/1 2/2 3/-1\n";
+        let m = load_obj(src).unwrap();
+        assert_eq!(m.uvs, [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        assert_eq!(m.triangles[0].uv, Some([0, 1, 2]));
+        assert_eq!(m.triangles[0].n, None);
+        let ply = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nproperty float s\nproperty float t\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0 0 0\n1 0 0 1 0\n0 1 0 0 1\n3 0 1 2\n";
+        let m = load_ply(ply.as_bytes()).unwrap();
+        assert_eq!(m.uvs[2], [0.0, 1.0]);
+        assert_eq!(m.triangles[0].uv, Some([0, 1, 2]));
     }
 
     #[test]

@@ -1,0 +1,8 @@
+# Wavefront material library. map_Kd gives the color, map_d the coverage
+# (here the PNG's own alpha channel), Ns the roughness of the plastic-like coat.
+newmtl leaf
+Kd 1 1 1
+Ks 0.5 0.5 0.5
+Ns 160
+map_Kd ../textures/leaf.png
+map_d ../textures/leaf.png

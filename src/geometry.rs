@@ -54,6 +54,7 @@ pub struct Sphere {
 }
 
 pub const NO_NORMALS: u32 = u32::MAX;
+pub const NO_UVS: u32 = u32::MAX;
 
 /// A triangle referencing the scene's global vertex arrays.
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +62,8 @@ pub struct Triangle {
     pub v: [u32; 3],
     /// Indices into the normal array, or `[NO_NORMALS; 3]` for flat shading.
     pub n: [u32; 3],
+    /// Indices into the UV array, or `[NO_UVS; 3]` for the default (0,0) (1,0) (0,1).
+    pub uv: [u32; 3],
     pub material: u32,
 }
 
@@ -68,6 +71,10 @@ impl Triangle {
     #[inline]
     pub fn has_normals(&self) -> bool {
         self.n[0] != NO_NORMALS
+    }
+    #[inline]
+    pub fn has_uvs(&self) -> bool {
+        self.uv[0] != NO_UVS
     }
 }
 
@@ -96,10 +103,11 @@ pub fn intersect_triangle(o: Vec3, d: Vec3, p0: Vec3, p1: Vec3, p2: Vec3, t_max:
     if t > 0.0 && t < t_max { Some((t, b1, b2)) } else { None }
 }
 
-/// Ray/sphere intersection with the numerically robust discriminant from
-/// Ray Tracing Gems ch. 7. `d` must be normalized.
+/// Both ray parameters where the ray crosses the sphere, ordered (may be negative),
+/// with the numerically robust discriminant from Ray Tracing Gems ch. 7.
+/// `d` must be normalized.
 #[inline]
-pub fn intersect_sphere(o: Vec3, d: Vec3, center: Vec3, radius: f32, t_max: f32) -> Option<f32> {
+pub fn sphere_roots(o: Vec3, d: Vec3, center: Vec3, radius: f32) -> Option<(f32, f32)> {
     let oc = o - center;
     let b = oc.dot(d);
     let l = oc - d * b;
@@ -111,17 +119,8 @@ pub fn intersect_sphere(o: Vec3, d: Vec3, center: Vec3, radius: f32, t_max: f32)
     let sq = disc.sqrt();
     // Stable root computation.
     let q = if b > 0.0 { -b - sq } else { -b + sq };
-    let (mut t0, mut t1) = (c / q, q);
-    if t0 > t1 {
-        std::mem::swap(&mut t0, &mut t1);
-    }
-    if t0 > 0.0 && t0 < t_max {
-        Some(t0)
-    } else if t1 > 0.0 && t1 < t_max {
-        Some(t1)
-    } else {
-        None
-    }
+    let (t0, t1) = (c / q, q);
+    Some(if t0 > t1 { (t1, t0) } else { (t0, t1) })
 }
 
 #[cfg(test)]
@@ -131,10 +130,11 @@ mod tests {
     #[test]
     fn sphere_hit_from_outside_and_inside() {
         let c = Vec3::new(0.0, 0.0, -5.0);
-        let t = intersect_sphere(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), c, 1.0, f32::INFINITY).unwrap();
-        assert!((t - 4.0).abs() < 1e-5);
-        let t = intersect_sphere(c, Vec3::new(0.0, 0.0, -1.0), c, 1.0, f32::INFINITY).unwrap();
-        assert!((t - 1.0).abs() < 1e-5);
+        let (t0, t1) = sphere_roots(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), c, 1.0).unwrap();
+        assert!((t0 - 4.0).abs() < 1e-5 && (t1 - 6.0).abs() < 1e-5);
+        let (t0, t1) = sphere_roots(c, Vec3::new(0.0, 0.0, -1.0), c, 1.0).unwrap();
+        assert!((t0 + 1.0).abs() < 1e-5 && (t1 - 1.0).abs() < 1e-5);
+        assert!(sphere_roots(Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.0, 0.0, -1.0), c, 1.0).is_none());
     }
 
     #[test]

@@ -1,3 +1,4 @@
 /target
 /renders
 *.png
+!scenes/textures/*.png

@@ -3,13 +3,14 @@
 use crate::bvh::Bvh;
 use crate::camera::CameraDesc;
 use crate::filter::FilterKind;
-use crate::geometry::{Aabb, Sphere, Triangle, intersect_sphere, intersect_triangle};
+use crate::geometry::{Aabb, Sphere, Triangle, intersect_triangle, sphere_roots};
 use crate::image::Tonemap;
 use crate::material::Material;
-use crate::math::{PI, Ray, Vec3};
+use crate::math::{Frame, PI, Ray, Vec3};
 use crate::output::OutputSettings;
-use crate::rng::Rng;
+use crate::rng::{Rng, hash64};
 use crate::sampling::{uniform_sphere, uniform_triangle};
+use crate::texture::TexCtx;
 
 #[derive(Clone, Debug)]
 pub struct RenderSettings {
@@ -103,7 +104,40 @@ pub struct Interaction {
     pub ng: Vec3,
     /// Shading normal (unit length).
     pub ns: Vec3,
+    pub uv: [f32; 2],
+    /// Position derivatives with respect to u and v (tangents for normal / bump mapping).
+    pub dpdu: Vec3,
+    pub dpdv: Vec3,
     pub material: u32,
+}
+
+impl Interaction {
+    pub fn tex_ctx(&self) -> TexCtx {
+        TexCtx { uv: self.uv, p: self.p }
+    }
+}
+
+/// Geometry arrays handed to `Scene::new`.
+#[derive(Default)]
+pub struct Geometry {
+    pub positions: Vec<Vec3>,
+    pub normals: Vec<Vec3>,
+    pub uvs: Vec<[f32; 2]>,
+    pub triangles: Vec<Triangle>,
+    pub spheres: Vec<Sphere>,
+}
+
+/// Latitude-longitude parameterization: u around +Y starting behind the sphere
+/// (u = 0.5 faces +Z), v = 1 at the north pole. Returns (uv, dp/du, dp/dv).
+fn sphere_param(n: Vec3, r: f32) -> ([f32; 2], Vec3, Vec3) {
+    let phi = n.x.atan2(n.z);
+    let theta = n.y.clamp(-1.0, 1.0).acos();
+    let uv = [0.5 + phi * (0.5 / PI), 1.0 - theta / PI];
+    let (sp, cp) = phi.sin_cos();
+    let (st, ct) = theta.sin_cos();
+    let dpdu = Vec3::new(cp, 0.0, -sp) * (2.0 * PI * r * st);
+    let dpdv = Vec3::new(ct * sp, -st, ct * cp) * (-PI * r);
+    (uv, dpdu, dpdv)
 }
 
 pub struct LightSample {
@@ -121,12 +155,16 @@ pub struct Scene {
     pub materials: Vec<Material>,
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
+    pub uvs: Vec<[f32; 2]>,
     pub triangles: Vec<Triangle>,
     pub spheres: Vec<Sphere>,
-    /// Files the scene was loaded from (scene file first, then meshes); watched for hot reload.
+    /// Files the scene was loaded from (scene file first, then meshes, material
+    /// libraries and textures); watched for hot reload.
     pub files: Vec<std::path::PathBuf>,
     pub output: OutputSettings,
     bvh: Bvh,
+    /// True if any material has an alpha mask (enables alpha testing in traversal).
+    any_alpha: bool,
     light_prims: Vec<u32>,
     light_cdf: Vec<f32>,
     /// Per primitive: (probability of selecting it as a light) / area. Zero for non-emitters.
@@ -135,29 +173,28 @@ pub struct Scene {
 
 /// Primitive ids are `0..triangles.len()` for triangles, followed by spheres.
 impl Scene {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         settings: RenderSettings,
         camera: CameraDesc,
         background: Background,
         materials: Vec<Material>,
-        positions: Vec<Vec3>,
-        normals: Vec<Vec3>,
-        triangles: Vec<Triangle>,
-        spheres: Vec<Sphere>,
+        geo: Geometry,
     ) -> Scene {
+        let any_alpha = materials.iter().any(|m| m.alpha.is_some());
         let mut scene = Scene {
             settings,
             camera,
             background,
             materials,
-            positions,
-            normals,
-            triangles,
-            spheres,
+            positions: geo.positions,
+            normals: geo.normals,
+            uvs: geo.uvs,
+            triangles: geo.triangles,
+            spheres: geo.spheres,
             files: Vec::new(),
             output: OutputSettings::default(),
             bvh: Bvh { nodes: Vec::new(), indices: Vec::new() },
+            any_alpha,
             light_prims: Vec::new(),
             light_cdf: Vec::new(),
             light_pdf_area: Vec::new(),
@@ -230,9 +267,10 @@ impl Scene {
         let n = self.num_prims();
         let mut weights = Vec::new();
         for prim in 0..n as u32 {
-            if let Material::Emissive { radiance, .. } = self.materials[self.prim_material(prim) as usize] {
+            let mat = &self.materials[self.prim_material(prim) as usize];
+            if mat.is_emissive() {
                 let area = self.prim_area(prim);
-                let lum = radiance.luminance();
+                let lum = mat.emission_mean().luminance();
                 if lum > 0.0 && area > 0.0 {
                     self.light_prims.push(prim);
                     weights.push((lum * area) as f64);
@@ -258,10 +296,62 @@ impl Scene {
         let nt = self.triangles.len() as u32;
         if prim < nt {
             let (p0, p1, p2) = self.tri_points(&self.triangles[prim as usize]);
-            intersect_triangle(ray.o, ray.d, p0, p1, p2, t_max).map(|(t, b1, b2)| Hit { t, prim, b1, b2 })
+            let (t, b1, b2) = intersect_triangle(ray.o, ray.d, p0, p1, p2, t_max)?;
+            let h = Hit { t, prim, b1, b2 };
+            (!self.any_alpha || self.alpha_pass(&h, ray)).then_some(h)
         } else {
             let s = &self.spheres[(prim - nt) as usize];
-            intersect_sphere(ray.o, ray.d, s.center, s.radius, t_max).map(|t| Hit { t, prim, b1: 0.0, b2: 0.0 })
+            let (t0, t1) = sphere_roots(ray.o, ray.d, s.center, s.radius)?;
+            // With alpha masks the far side may be visible through a cut-out near side.
+            for t in [t0, t1] {
+                if t > 0.0 && t < t_max {
+                    let h = Hit { t, prim, b1: 0.0, b2: 0.0 };
+                    if !self.any_alpha || self.alpha_pass(&h, ray) {
+                        return Some(h);
+                    }
+                }
+            }
+            None
+        }
+    }
+
+    /// Alpha test: false if the hit falls on a cut-out part of a masked material.
+    /// Fractional alpha is resolved stochastically with a hash of the hit point.
+    fn alpha_pass(&self, h: &Hit, ray: &Ray) -> bool {
+        let Some(tex) = &self.materials[self.prim_material(h.prim) as usize].alpha else { return true };
+        let p = ray.o + ray.d * h.t;
+        let uv = self.hit_uv(h, p);
+        let a = tex.eval_f(&TexCtx { uv, p });
+        if a >= 1.0 {
+            return true;
+        }
+        if a <= 0.0 {
+            return false;
+        }
+        let key = (p.x.to_bits() as u64) ^ ((p.y.to_bits() as u64) << 21) ^ ((p.z.to_bits() as u64) << 42);
+        let u = (hash64(key ^ h.prim as u64) >> 40) as f32 * (1.0 / (1u64 << 24) as f32);
+        u < a
+    }
+
+    /// Texture coordinates of a hit (cheaper than a full `interaction`).
+    fn hit_uv(&self, h: &Hit, p: Vec3) -> [f32; 2] {
+        let nt = self.triangles.len() as u32;
+        if h.prim < nt {
+            let uv = self.tri_uvs(&self.triangles[h.prim as usize]);
+            let b0 = 1.0 - h.b1 - h.b2;
+            [uv[0][0] * b0 + uv[1][0] * h.b1 + uv[2][0] * h.b2, uv[0][1] * b0 + uv[1][1] * h.b1 + uv[2][1] * h.b2]
+        } else {
+            let s = &self.spheres[(h.prim - nt) as usize];
+            sphere_param(((p - s.center) * (1.0 / s.radius)).normalize(), s.radius).0
+        }
+    }
+
+    #[inline]
+    fn tri_uvs(&self, t: &Triangle) -> [[f32; 2]; 3] {
+        if t.has_uvs() {
+            t.uv.map(|i| self.uvs[i as usize])
+        } else {
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
         }
     }
 
@@ -356,18 +446,38 @@ impl Scene {
 
     pub fn interaction(&self, ray: &Ray, hit: &Hit) -> Interaction {
         let nt = self.triangles.len() as u32;
-        if hit.prim < nt {
+        let mut si = if hit.prim < nt {
             let tri = &self.triangles[hit.prim as usize];
             let (p0, p1, p2) = self.tri_points(tri);
-            let p = p0 * (1.0 - hit.b1 - hit.b2) + p1 * hit.b1 + p2 * hit.b2;
+            let b0 = 1.0 - hit.b1 - hit.b2;
+            let p = p0 * b0 + p1 * hit.b1 + p2 * hit.b2;
             let (ng, ns) = self.tri_normals(tri, hit.b1, hit.b2);
-            Interaction { p, ng, ns, material: tri.material }
+            let t = self.tri_uvs(tri);
+            let uv = [t[0][0] * b0 + t[1][0] * hit.b1 + t[2][0] * hit.b2, t[0][1] * b0 + t[1][1] * hit.b1 + t[2][1] * hit.b2];
+            // Solve [dp02 dp12] = [dpdu dpdv] * [duv02 duv12] (pbrt).
+            let (d02, d12) = ([t[0][0] - t[2][0], t[0][1] - t[2][1]], [t[1][0] - t[2][0], t[1][1] - t[2][1]]);
+            let (dp02, dp12) = (p0 - p2, p1 - p2);
+            let det = d02[0] * d12[1] - d02[1] * d12[0];
+            let (dpdu, dpdv) = if det.abs() > 1e-12 {
+                let inv = 1.0 / det;
+                ((dp02 * d12[1] - dp12 * d02[1]) * inv, (dp12 * d02[0] - dp02 * d12[0]) * inv)
+            } else {
+                (Vec3::ZERO, Vec3::ZERO)
+            };
+            Interaction { p, ng, ns, uv, dpdu, dpdv, material: tri.material }
         } else {
             let s = &self.spheres[(hit.prim - nt) as usize];
             let p = ray.o + ray.d * hit.t;
             let n = ((p - s.center) * (1.0 / s.radius)).normalize();
-            Interaction { p: s.center + n * s.radius, ng: n, ns: n, material: s.material }
+            let (uv, dpdu, dpdv) = sphere_param(n, s.radius);
+            Interaction { p: s.center + n * s.radius, ng: n, ns: n, uv, dpdu, dpdv, material: s.material }
+        };
+        let valid = si.dpdu.is_finite() && si.dpdv.is_finite() && si.dpdu.cross(si.dpdv).length_squared() > 0.0;
+        if !valid {
+            let f = Frame::from_normal(si.ns);
+            (si.dpdu, si.dpdv) = (f.t, f.b);
         }
+        si
     }
 
     /// Picks an emitter proportionally to its power and samples a point on it uniformly by area.
@@ -379,20 +489,19 @@ impl Scene {
         let i = self.light_cdf.partition_point(|&c| c <= u).min(self.light_prims.len() - 1);
         let prim = self.light_prims[i];
         let nt = self.triangles.len() as u32;
-        let (lp, ln, mat) = if prim < nt {
+        let (lp, ln, uv, mat) = if prim < nt {
             let tri = &self.triangles[prim as usize];
             let (b1, b2) = uniform_triangle(rng.f32(), rng.f32());
             let (p0, p1, p2) = self.tri_points(tri);
             let lp = p0 * (1.0 - b1 - b2) + p1 * b1 + p2 * b2;
-            (lp, self.tri_normals(tri, b1, b2).0, tri.material)
+            let uv = self.hit_uv(&Hit { t: 0.0, prim, b1, b2 }, lp);
+            (lp, self.tri_normals(tri, b1, b2).0, uv, tri.material)
         } else {
             let s = &self.spheres[(prim - nt) as usize];
             let n = uniform_sphere(rng.f32(), rng.f32());
-            (s.center + n * s.radius, n, s.material)
+            (s.center + n * s.radius, n, sphere_param(n, s.radius).0, s.material)
         };
-        let Material::Emissive { radiance, two_sided } = self.materials[mat as usize] else {
-            return None;
-        };
+        let (radiance, two_sided) = self.materials[mat as usize].emission(&TexCtx { uv, p: lp })?;
         let d = lp - p;
         let dist2 = d.length_squared();
         if dist2 <= 0.0 {

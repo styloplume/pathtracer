@@ -1,0 +1,182 @@
+# Material and texture showcase.
+#
+# Front row: measured gold, rough absorbing glass, plastic, clear-coated car paint, velvet.
+# Back row: image texture, procedural bump, normal-mapped aluminium, alpha-masked OBJ + MTL.
+# Behind: an area light with a procedural (textured) emission.
+#
+# Any texturable parameter (colors, roughness, metallic, ...) accepts:
+#   0.5 or [r, g, b]                      constant
+#   "textures/file.png"                   image (png, jpg, tga, ppm/pgm, pfm, hdr)
+#   { file = "...", scale = [4, 4], offset = [0, 0], wrap = "repeat" | "clamp" | "mirror",
+#     filter = "bilinear" | "nearest", colorspace = "srgb" | "linear",
+#     channel = "r" | "g" | "b" | "a" | "luminance", multiplier = [r, g, b] }
+#   { type = "checker", even = ..., odd = ..., scale = 8, space = "uv" | "world" }
+#   { type = "noise" | "turbulence", low = ..., high = ..., scale = 4, octaves = 5, space = "world" | "uv" }
+
+[render]
+width = 1280
+height = 640
+spp = 512
+max_depth = 12
+noise_threshold = 0.02
+
+[camera]
+position = [0, 1.7, 7.2]
+look_at = [0, 0.75, -0.2]
+fov = 34
+
+[background]
+type = "gradient"
+zenith = [0.25, 0.42, 0.8]
+horizon = [0.85, 0.88, 0.95]
+ground = [0.3, 0.28, 0.25]
+intensity = 0.5
+
+# --- Materials ------------------------------------------------------------------
+
+[materials.floor]
+type = "plastic"
+color = { type = "checker", even = [0.75, 0.75, 0.72], odd = [0.18, 0.18, 0.2], scale = 1, space = "world" }
+roughness = { type = "checker", even = 0.35, odd = 0.1, scale = 1, space = "world" }
+
+[materials.gold]
+type = "metal"
+preset = "gold"        # measured complex IOR: gold, silver, copper, aluminium, iron, chromium, platinum
+roughness = 0.2        # rough metals keep their energy (multiple-scattering compensation)
+
+[materials.green_glass]
+type = "glass"
+ior = 1.5
+roughness = 0.12       # GGX transmission
+color = [0.45, 0.85, 0.6]   # Beer–Lambert: transmittance after `distance` units
+distance = 0.6
+
+[materials.red_plastic]
+type = "plastic"       # diffuse base under a dielectric coat
+color = [0.7, 0.06, 0.05]
+roughness = 0.08
+ior = 1.5
+
+[materials.car_paint]
+type = "principled"
+base_color = [0.04, 0.12, 0.5]
+metallic = 0.6
+roughness = 0.35
+clearcoat = 1.0
+clearcoat_roughness = 0.02
+
+[materials.velvet]
+type = "principled"
+base_color = [0.45, 0.04, 0.12]
+roughness = 1.0
+specular = 0.2
+sheen = 1.0
+sheen_tint = 0.6
+
+[materials.globe]
+type = "diffuse"
+albedo = "textures/grid.png"
+
+[materials.hammered]
+type = "plastic"
+color = [0.85, 0.82, 0.75]
+roughness = 0.25
+bump = { type = "turbulence", scale = 5, octaves = 4 }
+bump_scale = 0.015     # world units of displacement per texture unit
+
+[materials.tiled_metal]
+type = "metal"
+preset = "aluminium"
+roughness = 0.3
+normal_map = { file = "textures/tiles_normal.png", scale = [4, 2] }
+normal_strength = 1.0
+
+[materials.glow]
+type = "light"
+emission = { type = "noise", low = [1.0, 0.35, 0.05], high = [0.1, 0.4, 1.0], scale = 3, space = "uv" }
+intensity = 1.5
+two_sided = false
+
+[materials.sun]
+type = "light"
+emission = [1.0, 0.92, 0.8]
+intensity = 300
+
+# --- Objects --------------------------------------------------------------------
+
+[[objects]]
+type = "quad"
+origin = [-30, 0, -30]
+u = [60, 0, 0]
+v = [0, 0, 60]
+material = "floor"
+
+[[objects]]
+type = "sphere"
+center = [14, 22, 12]
+radius = 1.6
+material = "sun"
+
+[[objects]]   # emitter panel behind the scene, facing +z
+type = "quad"
+origin = [-2.5, 1.3, -3.4]
+u = [5, 0, 0]
+v = [0, 1.4, 0]
+material = "glow"
+
+# Front row
+[[objects]]
+type = "sphere"
+center = [-3.0, 0.55, 0.9]
+radius = 0.55
+material = "gold"
+
+[[objects]]
+type = "sphere"
+center = [-1.5, 0.55, 0.9]
+radius = 0.55
+material = "green_glass"
+
+[[objects]]
+type = "sphere"
+center = [0.0, 0.55, 0.9]
+radius = 0.55
+material = "red_plastic"
+
+[[objects]]
+type = "sphere"
+center = [1.5, 0.55, 0.9]
+radius = 0.55
+material = "car_paint"
+
+[[objects]]
+type = "sphere"
+center = [3.0, 0.55, 0.9]
+radius = 0.55
+material = "velvet"
+
+# Back row
+[[objects]]
+type = "sphere"
+center = [-2.7, 0.75, -1.2]
+radius = 0.75
+material = "globe"
+
+[[objects]]
+type = "sphere"
+center = [-0.9, 0.75, -1.2]
+radius = 0.75
+material = "hammered"
+
+[[objects]]
+type = "sphere"
+center = [0.9, 0.75, -1.2]
+radius = 0.75
+material = "tiled_metal"
+
+[[objects]]   # material, texture and alpha mask come from models/leaf.mtl
+type = "mesh"
+file = "models/leaf.obj"
+scale = 1.6
+rotate = [0, -25, 0]
+translate = [2.7, 0, -1.2]

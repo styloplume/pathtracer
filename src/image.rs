@@ -121,7 +121,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 // ------------------------------------------------------------------ PNG
 
 #[inline]
-fn paeth(a: u8, b: u8, c: u8) -> u8 {
+pub(crate) fn paeth(a: u8, b: u8, c: u8) -> u8 {
     let p = a as i16 + b as i16 - c as i16;
     let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
     if pa <= pb && pa <= pc {

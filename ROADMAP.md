@@ -52,21 +52,25 @@ Legend: `[x]` done · `[ ]` planned. Order within a milestone is a suggestion, n
 Possible follow-ups: splatting filters with negative lobes (Mitchell, Lanczos); OpenEXR output;
 running the interactive denoiser on a background thread.
 
-## M3 — Materials & textures
+## M3 — Materials & textures ✅
 
-- [ ] Texture coordinates through the pipeline (OBJ `vt`, PLY `u v`/`s t`, sphere UVs)
-- [ ] Image loaders, dependency free: PPM/PFM first, then PNG (inflate), then HDR, maybe TGA/JPEG baseline
-- [ ] Texture sampling (bilinear, wrap modes), procedural textures (checker, noise)
-- [ ] OBJ `.mtl` import (Kd, Ks, Ns, Ni, d, Ke, map_Kd …) mapped to our materials
-- [ ] Normal / bump mapping
-- [ ] Rough dielectric (GGX transmission)
-- [ ] Beer–Lambert absorption inside dielectrics (replace `tint`)
-- [ ] Coated / plastic material (dielectric layer over diffuse), energy-conserving
-- [ ] Measured conductor IORs (complex Fresnel for gold, copper, aluminium …)
-- [ ] Multiple-scattering energy compensation for rough GGX
-- [ ] Principled / uber material (base color, metallic, roughness, specular, transmission, clearcoat, sheen)
-- [ ] Textured emission
-- [ ] Alpha / cut-out masks
+- [x] Texture coordinates through the pipeline (OBJ `vt`, PLY `u v`/`s t`, quad and sphere UVs, dp/du dp/dv tangents)
+- [x] Image loaders, dependency free: PPM/PGM, PFM, PNG (all color types / depths, palette, tRNS, Adam7), Radiance HDR, TGA (raw / RLE), baseline JPEG
+- [x] Texture sampling (bilinear / nearest, repeat / clamp / mirror, sRGB decoding, channel select), procedural textures (checker, Perlin fBm / turbulence)
+- [x] OBJ `.mtl` import (Kd, Ks, Ke, Ns, Ni, d/Tr, illum, Pr/Pm, map_Kd/Ks/Ke/d/Bump/norm/Pr/Pm with -s -o -bm -clamp) mapped to our materials
+- [x] Normal / bump mapping
+- [x] Rough dielectric (GGX transmission, Walter et al. with VNDF sampling)
+- [x] Beer–Lambert absorption inside dielectrics (replaces `tint`)
+- [x] Coated / plastic material (dielectric layer over diffuse), energy-conserving
+- [x] Measured conductor IORs (complex Fresnel for gold, silver, copper, aluminium, iron, chromium, platinum)
+- [x] Multiple-scattering energy compensation for rough GGX conductors (Kulla–Conty)
+- [x] Principled / uber material (base color, metallic, roughness, specular, transmission, clearcoat, sheen)
+- [x] Textured emission
+- [x] Alpha / cut-out masks (stochastic for fractional alpha, also in shadow rays)
+
+Possible follow-ups: progressive JPEG; texture filtering with ray differentials / mipmaps; energy
+compensation for rough dielectrics and coats; MikkTSpace per-vertex tangents; named reusable textures;
+emitter sampling that respects textured emission and alpha masks.
 
 ## M4 — Lighting
 
