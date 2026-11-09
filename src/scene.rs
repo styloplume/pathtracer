@@ -2,10 +2,12 @@
 
 use crate::bvh::Bvh;
 use crate::camera::CameraDesc;
+use crate::filter::FilterKind;
 use crate::geometry::{Aabb, Sphere, Triangle, intersect_sphere, intersect_triangle};
 use crate::image::Tonemap;
 use crate::material::Material;
 use crate::math::{PI, Ray, Vec3};
+use crate::output::OutputSettings;
 use crate::rng::Rng;
 use crate::sampling::{uniform_sphere, uniform_triangle};
 
@@ -27,6 +29,16 @@ pub struct RenderSettings {
     /// Clamp per-sample luminance to tame fireflies (biased!). 0 disables.
     pub clamp: f32,
     pub seed: u64,
+    /// Pixel reconstruction filter and its radius in pixels.
+    pub filter: FilterKind,
+    pub filter_radius: f32,
+    /// Adaptive sampling: pixels whose noise estimate is below this stop receiving
+    /// samples; the render ends when all have. 0 disables.
+    pub noise_threshold: f32,
+    /// Samples every pixel gets before adaptive sampling may stop it.
+    pub min_spp: u32,
+    /// Stop after this many seconds of rendering. 0 disables.
+    pub time_limit: f32,
 }
 
 impl Default for RenderSettings {
@@ -42,6 +54,11 @@ impl Default for RenderSettings {
             tonemap: Tonemap::Aces,
             clamp: 0.0,
             seed: 0,
+            filter: FilterKind::Gaussian,
+            filter_radius: FilterKind::Gaussian.default_radius(),
+            noise_threshold: 0.0,
+            min_spp: 16,
+            time_limit: 0.0,
         }
     }
 }
@@ -50,7 +67,11 @@ impl Default for RenderSettings {
 pub enum Background {
     Color(Vec3),
     /// Simple sky: blends horizon -> zenith above the horizon and horizon -> ground below.
-    Gradient { zenith: Vec3, horizon: Vec3, ground: Vec3 },
+    Gradient {
+        zenith: Vec3,
+        horizon: Vec3,
+        ground: Vec3,
+    },
 }
 
 impl Background {
@@ -104,6 +125,7 @@ pub struct Scene {
     pub spheres: Vec<Sphere>,
     /// Files the scene was loaded from (scene file first, then meshes); watched for hot reload.
     pub files: Vec<std::path::PathBuf>,
+    pub output: OutputSettings,
     bvh: Bvh,
     light_prims: Vec<u32>,
     light_cdf: Vec<f32>,
@@ -134,6 +156,7 @@ impl Scene {
             triangles,
             spheres,
             files: Vec::new(),
+            output: OutputSettings::default(),
             bvh: Bvh { nodes: Vec::new(), indices: Vec::new() },
             light_prims: Vec::new(),
             light_cdf: Vec::new(),

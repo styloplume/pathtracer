@@ -1,11 +1,13 @@
 //! Builds a `Scene` from a TOML scene description. See `scenes/*.toml` for examples.
 
 use crate::camera::CameraDesc;
+use crate::filter::FilterKind;
 use crate::geometry::{NO_NORMALS, Sphere, Triangle};
 use crate::image::Tonemap;
 use crate::material::Material;
 use crate::math::{Transform, Vec3};
 use crate::mesh;
+use crate::output::{Aov, Format, OutputSettings};
 use crate::scene::{Background, RenderSettings, Scene};
 use crate::toml::{self, Table, Value};
 use std::collections::HashMap;
@@ -22,6 +24,7 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
     let settings = parse_render(section("render")?)?;
     let camera = parse_camera(section("camera")?)?;
     let background = parse_background(section("background")?)?;
+    let output = parse_output(section("output")?)?;
 
     let mut b = Builder::default();
     for (name, v) in section("materials")? {
@@ -46,8 +49,10 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
     }
     let mut files = vec![path.to_path_buf()];
     files.append(&mut b.files);
-    let mut scene = Scene::new(settings, camera, background, b.materials, b.positions, b.normals, b.triangles, b.spheres);
+    let mut scene =
+        Scene::new(settings, camera, background, b.materials, b.positions, b.normals, b.triangles, b.spheres);
     scene.files = files;
+    scene.output = output;
     Ok(scene)
 }
 
@@ -63,7 +68,9 @@ fn section<'a>(doc: &'a Table, empty: &'a Table, name: &str) -> Result<&'a Table
 fn num(t: &Table, key: &str, ctx: &str) -> Result<Option<f64>, String> {
     match t.get(key) {
         None => Ok(None),
-        Some(v) => v.as_f64().map(Some).ok_or_else(|| format!("{ctx}: '{key}' must be a number, got {}", v.type_name())),
+        Some(v) => {
+            v.as_f64().map(Some).ok_or_else(|| format!("{ctx}: '{key}' must be a number, got {}", v.type_name()))
+        }
     }
 }
 
@@ -135,7 +142,26 @@ fn parse_render(t: &Table) -> Result<RenderSettings, String> {
         None => d.tonemap,
         Some(s) => Tonemap::parse(s).ok_or_else(|| format!("{ctx}: unknown tonemap '{s}' (none, reinhard, aces)"))?,
     };
+    let filter = match str_opt(t, "filter", ctx)? {
+        None => d.filter,
+        Some(s) => FilterKind::parse(s)
+            .ok_or_else(|| format!("{ctx}: unknown filter '{s}' (box, tent, gaussian, blackman-harris)"))?,
+    };
+    let filter_radius = f32_or(t, "filter_radius", filter.default_radius(), ctx)?;
+    if !(filter_radius > 0.0 && filter_radius <= 8.0) {
+        return Err(format!("{ctx}: 'filter_radius' must be in (0, 8] pixels"));
+    }
+    let noise_threshold = f32_or(t, "noise_threshold", d.noise_threshold, ctx)?;
+    let time_limit = f32_or(t, "time_limit", d.time_limit, ctx)?;
+    if noise_threshold < 0.0 || time_limit < 0.0 {
+        return Err(format!("{ctx}: 'noise_threshold' and 'time_limit' must not be negative"));
+    }
     let s = RenderSettings {
+        filter,
+        filter_radius,
+        noise_threshold,
+        time_limit,
+        min_spp: u32_or(t, "min_spp", d.min_spp, ctx)?,
         width: u32_or(t, "width", d.width, ctx)?,
         height: u32_or(t, "height", d.height, ctx)?,
         spp: u32_or(t, "spp", d.spp, ctx)?.max(1),
@@ -151,6 +177,49 @@ fn parse_render(t: &Table) -> Result<RenderSettings, String> {
         return Err(format!("{ctx}: width and height must be positive"));
     }
     Ok(s)
+}
+
+/// A string or an array of strings, each parsed by `parse`.
+fn str_list<T>(
+    t: &Table,
+    key: &str,
+    ctx: &str,
+    parse: fn(&str) -> Option<T>,
+    allowed: &str,
+) -> Result<Option<Vec<T>>, String> {
+    let items: Vec<&Value> = match t.get(key) {
+        None => return Ok(None),
+        Some(v @ Value::String(_)) => vec![v],
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| format!("{ctx}: '{key}' must be a string or an array of strings"))?
+            .iter()
+            .collect(),
+    };
+    items
+        .into_iter()
+        .map(|v| {
+            let s = v.as_str().ok_or_else(|| format!("{ctx}: '{key}' must contain strings"))?;
+            parse(s).ok_or_else(|| format!("{ctx}: unknown {key} entry '{s}' ({allowed})"))
+        })
+        .collect::<Result<Vec<T>, String>>()
+        .map(Some)
+}
+
+fn parse_output(t: &Table) -> Result<OutputSettings, String> {
+    let ctx = "[output]";
+    let d = OutputSettings::default();
+    let formats = str_list(t, "formats", ctx, Format::parse, "png, hdr, pfm")?.unwrap_or(d.formats);
+    if formats.is_empty() {
+        return Err(format!("{ctx}: 'formats' must not be empty"));
+    }
+    Ok(OutputSettings {
+        path: str_opt(t, "path", ctx)?.map(str::to_owned),
+        formats,
+        save_on_finish: bool_or(t, "save_on_finish", d.save_on_finish, ctx)?,
+        denoise: bool_or(t, "denoise", d.denoise, ctx)?,
+        aovs: str_list(t, "aovs", ctx, Aov::parse, "albedo, normal, depth")?.unwrap_or(d.aovs),
+    })
 }
 
 fn parse_camera(t: &Table) -> Result<CameraDesc, String> {
@@ -183,7 +252,9 @@ fn parse_background(t: &Table) -> Result<Background, String> {
 fn parse_material(t: &Table, ctx: &str) -> Result<Material, String> {
     let ty = str_opt(t, "type", ctx)?.unwrap_or("diffuse");
     Ok(match ty {
-        "diffuse" | "lambert" => Material::Diffuse { albedo: vec3_any(t, &["albedo", "color"], Vec3::splat(0.8), ctx)? },
+        "diffuse" | "lambert" => {
+            Material::Diffuse { albedo: vec3_any(t, &["albedo", "color"], Vec3::splat(0.8), ctx)? }
+        }
         "conductor" | "metal" => Material::Conductor {
             color: vec3_any(t, &["color", "albedo"], Vec3::splat(0.9), ctx)?,
             roughness: f32_or(t, "roughness", 0.0, ctx)?.clamp(0.0, 1.0),
@@ -199,7 +270,9 @@ fn parse_material(t: &Table, ctx: &str) -> Result<Material, String> {
             radiance: vec3_any(t, &["emission", "color"], Vec3::ONE, ctx)? * f32_or(t, "intensity", 1.0, ctx)?,
             two_sided: bool_or(t, "two_sided", false, ctx)?,
         },
-        other => return Err(format!("{ctx}: unknown material type '{other}' (diffuse, metal, glass, light)")),
+        other => {
+            return Err(format!("{ctx}: unknown material type '{other}' (diffuse, metal, glass, light)"));
+        }
     })
 }
 
@@ -283,12 +356,21 @@ impl Builder {
                 let xf = parse_transform(t, ctx)?;
                 self.add_mesh(&data, &xf, mat, t, ctx)?;
             }
-            other => return Err(format!("{ctx}: unknown object type '{other}' (sphere, quad, triangle, mesh)")),
+            other => {
+                return Err(format!("{ctx}: unknown object type '{other}' (sphere, quad, triangle, mesh)"));
+            }
         }
         Ok(())
     }
 
-    fn add_mesh(&mut self, m: &mesh::MeshData, xf: &Transform, mat: Option<u32>, t: &Table, ctx: &str) -> Result<(), String> {
+    fn add_mesh(
+        &mut self,
+        m: &mesh::MeshData,
+        xf: &Transform,
+        mat: Option<u32>,
+        t: &Table,
+        ctx: &str,
+    ) -> Result<(), String> {
         let smooth = bool_or(t, "smooth", true, ctx)?;
         // Map each material group in the file to a scene material.
         let mut group_mat = Vec::with_capacity(m.groups.len());
@@ -327,7 +409,8 @@ impl Builder {
     }
 
     fn push_tri(&mut self, v: [u32; 3], n: Option<[u32; 3]>, material: u32) {
-        let (p0, p1, p2) = (self.positions[v[0] as usize], self.positions[v[1] as usize], self.positions[v[2] as usize]);
+        let (p0, p1, p2) =
+            (self.positions[v[0] as usize], self.positions[v[1] as usize], self.positions[v[2] as usize]);
         if (p1 - p0).cross(p2 - p0).length_squared() == 0.0 {
             return; // degenerate
         }

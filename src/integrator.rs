@@ -6,25 +6,55 @@ use crate::rng::Rng;
 use crate::sampling::power_heuristic;
 use crate::scene::Scene;
 
+/// One camera path's radiance estimate plus the auxiliary outputs (AOVs) of its
+/// first visible surface, used as denoiser guides and as AOV images.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PathSample {
+    pub radiance: Vec3,
+    /// Albedo of the first non-specular surface, times the throughput of any
+    /// perfect-specular bounces before it (so mirrors/glass show what they reflect).
+    pub albedo: Vec3,
+    /// World-space shading normal of that surface, facing the incoming ray; zero on escape.
+    pub normal: Vec3,
+    /// Distance along the camera ray to the first hit; zero on escape.
+    pub depth: f32,
+}
+
 /// Estimates the radiance arriving along `ray`.
-pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> Vec3 {
+pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> PathSample {
+    let mut out = PathSample::default();
     let mut l = Vec3::ZERO;
     let mut beta = Vec3::ONE;
     // Pdf of the BSDF sample that generated the current ray, for MIS on emitter hits.
     let mut prev_pdf = 0.0f32;
     let mut prev_delta = true;
+    // AOVs are recorded once, at the first non-delta vertex (or on escape).
+    let mut aov_pending = true;
 
     for depth in 0..scene.settings.max_depth {
         let Some(hit) = scene.intersect(&ray, f32::INFINITY) else {
-            l += beta * scene.background.eval(ray.d);
+            let bg = scene.background.eval(ray.d);
+            if aov_pending {
+                aov_pending = false;
+                out.albedo = beta * bg.max(Vec3::ZERO).min(Vec3::ONE);
+            }
+            l += beta * bg;
             break;
         };
+        if depth == 0 {
+            out.depth = hit.t;
+        }
         let si = scene.interaction(&ray, &hit);
         let mat = &scene.materials[si.material as usize];
         let wo_world = -ray.d;
 
         // Emitters: add emission (MIS-weighted against light sampling) and stop.
         if let Material::Emissive { radiance, two_sided } = *mat {
+            if aov_pending {
+                aov_pending = false;
+                out.albedo = beta * mat.albedo();
+                out.normal = if wo_world.dot(si.ng) < 0.0 { -si.ng } else { si.ng };
+            }
             let cos_l = wo_world.dot(si.ng);
             if cos_l > 0.0 || two_sided {
                 if prev_delta {
@@ -43,6 +73,11 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> Vec3 {
         let (mut ns, ng) = if !transmissive && wo_world.dot(si.ng) < 0.0 { (-si.ns, -si.ng) } else { (si.ns, si.ng) };
         if !transmissive && wo_world.dot(ns) <= 0.0 {
             ns = ng; // shading normal faces away from the viewer; fall back to flat
+        }
+        if aov_pending && !mat.is_delta() {
+            aov_pending = false;
+            out.albedo = beta * mat.albedo();
+            out.normal = ns;
         }
         let frame = Frame::from_normal(ns);
         let wo = frame.to_local(wo_world);
@@ -84,5 +119,10 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> Vec3 {
             beta /= q;
         }
     }
-    l
+    // A path that ended on delta surfaces only: fall back to the last throughput.
+    if aov_pending {
+        out.albedo = beta.max(Vec3::ZERO).min(Vec3::ONE);
+    }
+    out.radiance = l;
+    out
 }

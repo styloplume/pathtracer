@@ -38,16 +38,19 @@ Legend: `[x]` done · `[ ]` planned. Order within a milestone is a suggestion, n
 - [x] Pause / resume rendering
 - [x] Optional resolution scale (render below window res, upscale) for heavy scenes
 
-## M2 — Image pipeline
+## M2 — Image pipeline ✅
 
-- [ ] HDR output: `.pfm` and Radiance `.hdr`
-- [ ] Compressed PNG (own deflate with fixed/dynamic Huffman)
-- [ ] Save on completion automatically (configurable)
-- [ ] Reconstruction filters (box / tent / Gaussian / Blackman-Harris) instead of box-only
-- [ ] Adaptive sampling: stop converged pixels, concentrate effort on noisy ones
-- [ ] Variance / convergence estimate per pixel; optional time or noise-threshold stop criterion
-- [ ] Simple denoiser (e.g. edge-aware à-trous with albedo/normal AOVs)
-- [ ] AOV outputs: albedo, normal, depth
+- [x] HDR output: `.pfm` and Radiance `.hdr` (RLE RGBE)
+- [x] Compressed PNG (own deflate: LZ77 + lazy matching, stored/fixed/dynamic Huffman per block, package-merge code lengths, PNG row filters); inflate too, ready for M3 image loading
+- [x] Save on completion automatically (`[output] save_on_finish`, `--autosave`)
+- [x] Reconstruction filters (box / tent / Gaussian / Blackman-Harris) via filter importance sampling
+- [x] Adaptive sampling: stop converged pixels (dilated mask), concentrate effort on noisy ones
+- [x] Variance / convergence estimate per pixel; time-limit and noise-threshold stop criteria; noise / samples heat-map views
+- [x] Simple denoiser: SVGF-style edge-aware à-trous with albedo demodulation, normal / depth / variance guides; interactive toggle
+- [x] AOV outputs: albedo, normal, depth (also viewable in the window)
+
+Possible follow-ups: splatting filters with negative lobes (Mitchell, Lanczos); OpenEXR output;
+running the interactive denoiser on a background thread.
 
 ## M3 — Materials & textures
 

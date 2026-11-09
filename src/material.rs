@@ -45,6 +45,17 @@ impl Material {
         matches!(self, Material::Dielectric { .. })
     }
 
+    /// Surface color for the albedo AOV (denoiser guide), in [0, 1].
+    pub fn albedo(&self) -> Vec3 {
+        let c = match *self {
+            Material::Diffuse { albedo } => albedo,
+            Material::Conductor { color, .. } => color,
+            Material::Dielectric { tint, .. } => tint,
+            Material::Emissive { radiance, .. } => radiance / radiance.max_elem().max(1.0),
+        };
+        c.max(Vec3::ZERO).min(Vec3::ONE)
+    }
+
     pub fn eval(&self, wo: Vec3, wi: Vec3) -> (Vec3, f32) {
         match *self {
             Material::Diffuse { albedo } => {
