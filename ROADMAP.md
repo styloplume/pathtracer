@@ -72,15 +72,21 @@ Possible follow-ups: progressive JPEG; texture filtering with ray differentials 
 compensation for rough dielectrics and coats; MikkTSpace per-vertex tangents; named reusable textures;
 emitter sampling that respects textured emission and alpha masks.
 
-## M4 — Lighting
+## M4 — Lighting ✅
 
-- [ ] Environment maps (equirectangular HDR) with importance sampling + MIS
-- [ ] Analytic sun + sky model (e.g. Preetham / Hosek-Wilkie)
-- [ ] Point, spot, and directional lights
-- [ ] Solid-angle sphere-light sampling (replace area sampling)
-- [ ] Spherical-triangle sampling for triangle lights
-- [ ] Light BVH / many-light sampling for scenes with thousands of emitters
-- [ ] Spectral rendering (hero wavelength) for dispersion and accurate color
+- [x] Environment maps (equirectangular HDR) with importance sampling + MIS; every background kind is a sampled light
+- [x] Analytic sun + sky model (Preetham, with an air-mass-attenuated black-body sun disk and a lit ground)
+- [x] Point, spot, and directional lights (directional optionally with an angular size), black-body `temperature`
+- [x] Solid-angle sphere-light sampling (replace area sampling)
+- [x] Spherical-triangle sampling for triangle lights
+- [x] Light BVH / many-light sampling for scenes with thousands of emitters (`light_sampler` = bvh / power / uniform)
+- [x] Spectral rendering (hero wavelength) for dispersion and accurate color; Abbe-number dispersion for glass
+- [x] Fix: shadow rays aim from the offset origin at the light point (near lights were self-occluded)
+
+Possible follow-ups: Hosek-Wilkie sky; spectral measured-IOR conductors and spectral textures (Jakob-Hanika
+uplift); bilinear-warped (cosine-aware) spherical-triangle sampling; light sampling for quads as spherical
+rectangles; textured-emission-aware light power; MIS-compensated environment sampling; light-path guiding for
+caustics through dispersive glass.
 
 ## M5 — Geometry & scenes
 

@@ -35,7 +35,9 @@ pub enum MaterialKind {
     /// Fresnel. Roughness 0 gives a perfect mirror.
     Conductor { color: Texture, roughness: Texture, fresnel: MetalFresnel, multiscatter: bool },
     /// Glass-like interface, smooth or GGX-rough, with Beer–Lambert absorption inside.
-    Dielectric { ior: f32, roughness: Texture, absorption: Vec3 },
+    /// `ior` is the index at 587.6 nm (`n_d`); a positive Abbe number makes it vary with
+    /// wavelength (dispersion, spectral mode only).
+    Dielectric { ior: f32, abbe: f32, roughness: Texture, absorption: Vec3 },
     /// Diffuse base under a (smooth or rough) dielectric coating.
     Plastic { color: Texture, roughness: Texture, ior: f32 },
     /// Uber material in the spirit of the Disney / Blender principled BSDF.
@@ -108,6 +110,11 @@ impl Material {
         }
     }
 
+    /// True if scattering depends on the wavelength (only the hero wavelength survives).
+    pub fn is_dispersive(&self) -> bool {
+        matches!(self.kind, MaterialKind::Dielectric { abbe, .. } if abbe > 0.0)
+    }
+
     /// Absorption coefficient of the interior (per unit distance).
     #[inline]
     pub fn absorption(&self) -> Vec3 {
@@ -170,7 +177,8 @@ impl Material {
     }
 
     /// Evaluates the textures and builds the BSDF for outgoing direction `wo` (local frame).
-    pub fn bsdf(&self, c: &TexCtx, wo: Vec3) -> Bsdf {
+    /// `lambda` is the hero wavelength in nm when rendering spectrally.
+    pub fn bsdf(&self, c: &TexCtx, wo: Vec3, lambda: Option<f32>) -> Bsdf {
         let mut b = Bsdf::default();
         let rough = |t: &Texture| alpha(t.eval_f(c));
         match &self.kind {
@@ -187,8 +195,12 @@ impl Material {
                 let ms = if *multiscatter { ms_factor(favg, a) } else { None };
                 b.push(Lobe::Reflect { alpha: a, fresnel: fr, ms }, 1.0);
             }
-            MaterialKind::Dielectric { ior, roughness, .. } => {
-                b.push(Lobe::Dielectric { ior: *ior, alpha: rough(roughness), tint: Vec3::ONE }, 1.0);
+            MaterialKind::Dielectric { ior, abbe, roughness, .. } => {
+                let ior = match lambda {
+                    Some(l) if *abbe > 0.0 => cauchy_ior(*ior, *abbe, l),
+                    _ => *ior,
+                };
+                b.push(Lobe::Dielectric { ior, alpha: rough(roughness), tint: Vec3::ONE }, 1.0);
             }
             MaterialKind::Plastic { color, roughness, ior } => {
                 let a = rough(roughness);
@@ -252,6 +264,14 @@ impl Principled {
             b.push(Lobe::Reflect { alpha: ca, fresnel: Fresnel::Dielectric(coat_ior), ms: None }, clearcoat);
         }
     }
+}
+
+/// Index of refraction at `lambda` nm from the index at the Fraunhofer d line (587.6 nm)
+/// and the Abbe number `V = (n_d - 1) / (n_F - n_C)`, with Cauchy's equation `n = A + B / lambda^2`.
+pub fn cauchy_ior(n_d: f32, abbe: f32, lambda: f32) -> f32 {
+    let inv2 = |l: f32| 1.0 / (l * l * 1e-6); // per square micrometre
+    let b = (n_d - 1.0) / (abbe * (inv2(486.1) - inv2(656.3)));
+    n_d + b * (inv2(lambda) - inv2(587.6))
 }
 
 // ---------------------------------------------------------------------------- measured metals
@@ -1013,10 +1033,20 @@ mod tests {
             sheen_tint: Texture::Const(Vec3::splat(0.5)),
         };
         let m = Material::new(MaterialKind::Principled(Box::new(p)));
-        let b = m.bsdf(&TexCtx::default(), wo());
+        let b = m.bsdf(&TexCtx::default(), wo(), None);
         assert_eq!(b.n, 6);
         let e = check(&b, wo(), 60_000);
         assert!(e < 1.05 && e > 0.2, "principled albedo {e}");
+    }
+
+    #[test]
+    fn cauchy_dispersion() {
+        // BK7: n_d 1.5168, V 64.17 -> n_F 1.5224, n_C 1.5143.
+        assert!((cauchy_ior(1.5168, 64.17, 587.6) - 1.5168).abs() < 1e-5);
+        assert!((cauchy_ior(1.5168, 64.17, 486.1) - 1.5224).abs() < 5e-4);
+        assert!((cauchy_ior(1.5168, 64.17, 656.3) - 1.5143).abs() < 5e-4);
+        let (f, c) = (cauchy_ior(1.5168, 64.17, 486.1), cauchy_ior(1.5168, 64.17, 656.3));
+        assert!(((1.5168 - 1.0) / (f - c) - 64.17).abs() < 0.1);
     }
 
     #[test]

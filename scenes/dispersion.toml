@@ -1,0 +1,126 @@
+# Spectral rendering and dispersion.
+#
+# With `spectral = true` every path carries four wavelengths (hero wavelength
+# sampling). A glass with an Abbe number refracts each wavelength differently: seen
+# through the horizontal prism, the white light bars on the back wall are bent upwards
+# and split into spectra. Lower Abbe numbers mean stronger dispersion: crown glass ~60,
+# flint ~30, diamond ~55 (with ior 2.42). The values below are exaggerated.
+
+[render]
+width = 1280
+height = 720
+spp = 2048
+max_depth = 16
+spectral = true        # or pass --spectral on the command line
+noise_threshold = 0.015
+
+[camera]
+position = [0, 1.1, 5.5]
+look_at = [0, 1.0, 0]
+fov = 36
+
+[background]
+color = [0.01, 0.01, 0.012]
+
+[materials.floor]
+type = "diffuse"
+albedo = 0.6
+
+[materials.bar]
+type = "light"
+temperature = 6500     # black-body colour, Kelvin
+intensity = 12
+
+[materials.flint]
+type = "glass"
+ior = 1.62
+abbe = 12
+
+[materials.diamond]
+type = "glass"
+ior = 2.42
+abbe = 20
+
+[[objects]]
+type = "quad"
+origin = [-10, 0, -10]
+u = [20, 0, 0]
+v = [0, 0, 20]
+material = "floor"
+
+# Horizontal light bars on the back wall (one-sided quads facing +z).
+[[objects]]
+type = "quad"
+origin = [-4, 0.2, -2.5]
+u = [8, 0, 0]
+v = [0, 0.06, 0]
+material = "bar"
+
+[[objects]]
+type = "quad"
+origin = [-4, 0.7, -2.5]
+u = [8, 0, 0]
+v = [0, 0.06, 0]
+material = "bar"
+
+[[objects]]
+type = "quad"
+origin = [-4, 1.2, -2.5]
+u = [8, 0, 0]
+v = [0, 0.06, 0]
+material = "bar"
+
+[[objects]]
+type = "quad"
+origin = [-4, 1.7, -2.5]
+u = [8, 0, 0]
+v = [0, 0.06, 0]
+material = "bar"
+
+[[objects]]
+type = "quad"
+origin = [-4, 2.2, -2.5]
+u = [8, 0, 0]
+v = [0, 0.06, 0]
+material = "bar"
+
+[[objects]]
+type = "quad"
+origin = [-4, 2.7, -2.5]
+u = [8, 0, 0]
+v = [0, 0.06, 0]
+material = "bar"
+
+[[objects]]
+type = "quad"
+origin = [-4, 3.2, -2.5]
+u = [8, 0, 0]
+v = [0, 0.06, 0]
+material = "bar"
+
+[[objects]]
+type = "quad"
+origin = [-4, 3.7, -2.5]
+u = [8, 0, 0]
+v = [0, 0.06, 0]
+material = "bar"
+
+[[objects]]   # equilateral prism lying along x, one face down-front
+type = "mesh"
+file = "models/prism.obj"
+material = "flint"
+scale = [1, 3, 1]      # the model's axis is y: stretch it, then turn it horizontal
+rotate = [180, 0, 90]
+translate = [-1.8, 1.0, 0]
+
+[[objects]]
+type = "sphere"
+center = [-1.6, 0.4, 1.4]
+radius = 0.4
+material = "diamond"
+
+[[objects]]
+type = "sphere"
+center = [1.6, 0.4, 1.4]
+radius = 0.4
+material = "flint"

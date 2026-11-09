@@ -1,0 +1,98 @@
+# Daylight: analytic Preetham sky with a physically sized sun.
+#
+# The sky and the sun are lights: both are importance sampled (next-event estimation
+# with MIS), so even the tiny sun disk gives clean shadows. Try changing the sun
+# elevation, the turbidity (haze) or `sun_size` while the window is open.
+
+[render]
+width = 1280
+height = 640
+spp = 512
+max_depth = 10
+noise_threshold = 0.02
+exposure = 0.0
+tonemap = "aces"
+
+[camera]
+position = [0, 1.5, 7.5]
+look_at = [0, 0.8, 0]
+fov = 34
+
+[background]
+type = "sky"
+sun_elevation = 22     # degrees above the horizon
+sun_azimuth = 140      # degrees: 0 = towards -z (away from the camera), 90 = +x
+turbidity = 3.0        # 1.7 (very clear) .. 10 (hazy)
+intensity = 1.0        # 1 = a white surface under a high sun is about 1
+ground = [0.25, 0.22, 0.18]  # albedo of the ground below the horizon
+sun = true             # add the sun disk (angular radius 0.27 degrees)
+sun_size = 1.0         # >1 = larger, softer sun with the same irradiance
+# rotate = 0           # degrees around y (or [x, y, z])
+
+[materials.ground]
+type = "plastic"
+color = { type = "checker", even = [0.7, 0.68, 0.64], odd = [0.45, 0.43, 0.4], scale = 1, space = "world" }
+roughness = 0.6
+
+[materials.white]
+type = "diffuse"
+albedo = 0.8
+
+[materials.chrome]
+type = "metal"
+preset = "chromium"
+roughness = 0.05
+
+[materials.glass]
+type = "glass"
+ior = 1.5
+
+[materials.copper]
+type = "metal"
+preset = "copper"
+roughness = 0.3
+
+[materials.paint]
+type = "principled"
+base_color = [0.6, 0.08, 0.05]
+roughness = 0.4
+clearcoat = 1.0
+
+[[objects]]
+type = "quad"
+origin = [-60, 0, -60]
+u = [120, 0, 0]
+v = [0, 0, 120]
+material = "ground"
+
+[[objects]]
+type = "sphere"
+center = [-2.6, 0.7, 0]
+radius = 0.7
+material = "white"
+
+[[objects]]
+type = "sphere"
+center = [-0.9, 0.7, 0.4]
+radius = 0.7
+material = "chrome"
+
+[[objects]]
+type = "sphere"
+center = [0.9, 0.7, 0.4]
+radius = 0.7
+material = "glass"
+
+[[objects]]
+type = "sphere"
+center = [2.6, 0.7, 0]
+radius = 0.7
+material = "copper"
+
+[[objects]]   # a tall box casting a long shadow
+type = "mesh"
+file = "models/box.obj"
+material = "paint"
+scale = [0.8, 2.4, 0.8]
+rotate = [0, 30, 0]
+translate = [0.2, 1.2, -3.0]

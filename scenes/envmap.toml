@@ -1,0 +1,80 @@
+# Image-based lighting: an equirectangular HDR environment (a synthetic photo studio
+# with softboxes), importance sampled by luminance.
+#
+# Any equirectangular image works (.hdr, .pfm, .png, .jpg, ...). The image centre
+# looks down -z; the top row is straight up. Float images are linear, 8-bit images
+# are decoded from sRGB.
+
+[render]
+width = 1280
+height = 720
+spp = 512
+max_depth = 10
+noise_threshold = 0.02
+
+[camera]
+position = [0, 1.4, 5.2]
+look_at = [0, 0.6, 0]
+fov = 35
+
+[background]
+type = "image"
+file = "textures/studio.hdr"
+intensity = 1.0       # multiplier (also accepts `color = [r, g, b]` as a tint)
+rotate = 20           # degrees around y (or [x, y, z])
+
+[materials.floor]
+type = "plastic"
+color = [0.3, 0.3, 0.32]
+roughness = 0.25
+
+[materials.gold]
+type = "metal"
+preset = "gold"
+roughness = 0.12
+
+[materials.glass]
+type = "glass"
+ior = 1.5
+color = [0.9, 0.95, 1.0]
+
+[materials.ceramic]
+type = "plastic"
+color = [0.85, 0.83, 0.8]
+roughness = 0.05
+
+[materials.rough_silver]
+type = "metal"
+preset = "silver"
+roughness = 0.35
+
+[[objects]]   # a large round floor disk would be nicer; a quad will do
+type = "quad"
+origin = [-6, 0, -6]
+u = [12, 0, 0]
+v = [0, 0, 12]
+material = "floor"
+
+[[objects]]
+type = "sphere"
+center = [-1.8, 0.55, 0]
+radius = 0.55
+material = "gold"
+
+[[objects]]
+type = "sphere"
+center = [-0.6, 0.55, 0.5]
+radius = 0.55
+material = "glass"
+
+[[objects]]
+type = "sphere"
+center = [0.6, 0.55, 0]
+radius = 0.55
+material = "ceramic"
+
+[[objects]]
+type = "sphere"
+center = [1.8, 0.55, 0.5]
+radius = 0.55
+material = "rough_silver"

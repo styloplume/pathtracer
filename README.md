@@ -9,7 +9,8 @@ cargo run --release -- scenes/spheres.toml --headless    # render to renders/sph
 
 Options: `--headless`, `-o FILE` (`.png` / `.hdr` / `.pfm` picks the format), `--spp N`, `--size WxH`, `--threads N`,
 `--time SECONDS` (time limit), `--noise T` (adaptive sampling threshold, e.g. `0.02`), `--denoise` (also save a
-denoised image), `--autosave` (window: save when a render completes), `--scale N` (render at 1/N window resolution).
+denoised image), `--spectral` (hero-wavelength spectral rendering), `--autosave` (window: save when a render
+completes), `--scale N` (render at 1/N window resolution).
 
 Window controls (`F1` shows them in the window):
 
@@ -39,7 +40,13 @@ exposure and tonemap changes are kept unless that part of the file changed.
 ## Features
 
 - **Progressive display** filling the whole window: coarse 32×32 blocks refine by halving down to 1×1 (each level only traces pixels not yet traced, so the preview costs nothing extra), then whole-image passes accumulate samples per pixel.
-- **Integrator:** unidirectional path tracing, next-event estimation with power-proportional light selection, MIS (power heuristic), Russian roulette.
+- **Integrator:** unidirectional path tracing, next-event estimation, MIS (power heuristic), Russian roulette; RGB or spectral.
+- **Lights:**
+  - area lights: any emissive sphere (sampled uniformly in the cone it subtends) or triangle (sampled uniformly in its spherical triangle, area sampling for tiny / huge solid angles);
+  - `[[lights]]`: `point`, `spot` (smooth falloff between `inner_angle` and `angle`) and `directional` (delta, or with an angular diameter for soft shadows); `power` or `intensity`, `color` and/or a black-body `temperature`;
+  - environment (`[background]`): constant, gradient, equirectangular image (`.hdr`, `.pfm`, `.png`, ...; rotatable) or `sky`: Preetham analytic daylight with a physically sized sun whose colour follows the air mass (`sun_elevation` / `sun_azimuth`, `turbidity`, `sun_size`). Every environment is importance sampled through a tabulated luminance distribution;
+  - light selection with a light BVH (bounds + emission cones, as in pbrt-v4): thousands of emitters cost little extra noise. `light_sampler = "power"` / `uniform` for comparison.
+- **Spectral rendering** (`[render] spectral = true`): hero wavelength sampling with four wavelengths per path, CIE 1931 colour matching (analytic fit), a smooth linear RGB → spectrum uplift; glass with an Abbe number (`abbe`) disperses light. Lights and emissive materials take a black-body `temperature`.
 - **Materials** (BSDFs are weighted mixtures of lobes):
   - `diffuse` (Lambert);
   - `metal`: GGX with VNDF sampling, Schlick F0 or measured complex IOR (`preset = "gold"`, silver, copper, aluminium, iron, chromium, platinum, or `eta` / `k`), Kulla–Conty multiple-scattering energy compensation;
@@ -65,14 +72,18 @@ exposure and tonemap changes are kept unless that part of the file changed.
 | `src/app.rs` | windowed front end: UI thread, render thread, input, HUD, hot reload |
 | `src/controls.rs` | orbit / pan / look / fly camera controller |
 | `src/renderer.rs` | progressive coarse-to-fine scheduling, adaptive sampling, threading, progress callbacks, display views |
-| `src/integrator.rs` | path tracing with NEE + MIS, AOVs |
+| `src/integrator.rs` | path tracing with NEE + MIS, AOVs; generic over RGB / spectral |
+| `src/lights.rs` | light types, light sampling (sphere cones, spherical triangles), light BVH |
+| `src/environment.rs` | environment maps and their importance sampling |
+| `src/sky.rs` | Preetham sky and sun |
+| `src/spectrum.rs` | wavelength sampling, colour matching, RGB uplift, black bodies |
 | `src/filter.rs` | reconstruction filters |
 | `src/denoise.rs` | à-trous denoiser |
 | `src/output.rs` | output naming, formats, denoised / AOV images |
 | `src/deflate.rs` | DEFLATE / zlib compressor and decompressor |
 | `src/material.rs` | materials, BSDF lobes, Fresnel, energy compensation tables |
 | `src/texture.rs` | image / procedural textures, Perlin noise |
-| `src/scene.rs` | scene data, BVH traversal, alpha testing, UVs / tangents, light sampling |
+| `src/scene.rs` | scene data, BVH traversal, alpha testing, UVs / tangents |
 | `src/bvh.rs` | SAH BVH builder |
 | `src/loader.rs` | TOML → scene, texture cache, MTL → material mapping |
 | `src/imageio.rs`, `src/jpeg.rs` | image decoders |
@@ -97,7 +108,10 @@ with `#[expect(lint, reason = "...")]`; plain `#[allow]` and a missing reason ar
 
 Enable the pre-commit hook (fmt, lint, rustdoc) once per clone: `git config core.hooksPath .githooks`.
 
-See `scenes/cornell.toml` for an annotated scene file and `scenes/materials.toml` for materials and textures.
+See `scenes/cornell.toml` for an annotated scene file, `scenes/materials.toml` for materials and textures,
+`scenes/lights.toml` for light types and many-light sampling, `scenes/sky.toml` for daylight, `scenes/envmap.toml`
+for image-based lighting and `scenes/dispersion.toml` for spectral rendering.
 
 Note: the glass `tint` parameter was replaced by Beer–Lambert absorption (`color` = transmittance after
-`distance` scene units); loading a scene that still uses `tint` reports this.
+`distance` scene units); loading a scene that still uses `tint` reports this. `[background] type = "sky"` used to be
+an alias of `gradient`; it now selects the analytic daylight model.

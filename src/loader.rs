@@ -1,16 +1,20 @@
 //! Builds a `Scene` from a TOML scene description. See `scenes/*.toml` for examples.
 
 use crate::camera::CameraDesc;
+use crate::environment::{EnvSource, Environment};
 use crate::filter::FilterKind;
 use crate::geometry::{NO_NORMALS, NO_UVS, Sphere, Triangle};
 use crate::image::Tonemap;
 use crate::imageio;
+use crate::lights::{Light, LightSamplerKind};
 use crate::material::{METAL_PRESETS, Material, MaterialKind, MetalFresnel, Principled, metal_preset};
-use crate::math::{Transform, Vec3};
+use crate::math::{PI, Transform, Vec3};
 use crate::mesh;
 use crate::mtl::{self, MtlMap, MtlMaterial};
 use crate::output::{Aov, Format, OutputSettings};
-use crate::scene::{Background, Geometry, RenderSettings, Scene};
+use crate::scene::{Geometry, RenderSettings, Scene};
+use crate::sky::{SUN_RADIUS, Sky};
+use crate::spectrum::blackbody_rgb;
 use crate::texture::{Channel, ImageTex, TexImage, Texture, Wrap};
 use crate::toml::{self, Table, Value};
 use std::collections::HashMap;
@@ -28,10 +32,18 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
 
     let settings = parse_render(section("render")?)?;
     let camera = parse_camera(section("camera")?)?;
-    let background = parse_background(section("background")?)?;
     let output = parse_output(section("output")?)?;
 
     let mut b = Builder::default();
+    let mut lights = b.parse_background(section("background")?, base_dir)?;
+    if let Some(ls) = doc.get("lights") {
+        let ls = ls.as_array().ok_or("'lights' must be an array of tables ([[lights]])")?;
+        for (i, l) in ls.iter().enumerate() {
+            let ctx = format!("[[lights]] #{}", i + 1);
+            let t = l.as_table().ok_or_else(|| format!("{ctx} must be a table"))?;
+            lights.push(parse_light(t, &ctx)?);
+        }
+    }
     for (name, v) in section("materials")? {
         let ctx = format!("[materials.{name}]");
         let t = v.as_table().ok_or_else(|| format!("{ctx} must be a table"))?;
@@ -49,6 +61,9 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
         }
     }
 
+    if !settings.spectral && b.materials.iter().any(Material::is_dispersive) {
+        eprintln!("warning: dispersion ('abbe') needs spectral rendering ([render] spectral = true or --spectral)");
+    }
     if b.triangles.is_empty() && b.spheres.is_empty() {
         eprintln!("warning: scene contains no objects");
     }
@@ -56,7 +71,7 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
     files.append(&mut b.files);
     let geo =
         Geometry { positions: b.positions, normals: b.normals, uvs: b.uvs, triangles: b.triangles, spheres: b.spheres };
-    let mut scene = Scene::new(settings, camera, background, b.materials, geo);
+    let mut scene = Scene::new(settings, camera, lights, b.materials, geo);
     scene.files = files;
     scene.output = output;
     Ok(scene)
@@ -168,6 +183,12 @@ fn parse_render(t: &Table) -> Result<RenderSettings, String> {
         tonemap,
         clamp: f32_or(t, "clamp", d.clamp, ctx)?,
         seed: u64::from(u32_or(t, "seed", 0, ctx)?),
+        spectral: bool_or(t, "spectral", d.spectral, ctx)?,
+        light_sampler: match str_opt(t, "light_sampler", ctx)? {
+            None => d.light_sampler,
+            Some(s) => LightSamplerKind::parse(s)
+                .ok_or_else(|| format!("{ctx}: unknown light_sampler '{s}' (bvh, power, uniform)"))?,
+        },
     };
     if s.width == 0 || s.height == 0 {
         return Err(format!("{ctx}: width and height must be positive"));
@@ -231,17 +252,100 @@ fn parse_camera(t: &Table) -> Result<CameraDesc, String> {
     })
 }
 
-fn parse_background(t: &Table) -> Result<Background, String> {
-    let ctx = "[background]";
-    let strength = f32_or(t, "intensity", 1.0, ctx)?;
-    match str_opt(t, "type", ctx)?.unwrap_or("color") {
-        "color" | "constant" => Ok(Background::Color(vec3_or(t, "color", Vec3::ZERO, ctx)? * strength)),
-        "gradient" | "sky" => Ok(Background::Gradient {
-            zenith: vec3_or(t, "zenith", Vec3::new(0.25, 0.45, 0.9), ctx)? * strength,
-            horizon: vec3_or(t, "horizon", Vec3::new(0.9, 0.95, 1.0), ctx)? * strength,
-            ground: vec3_or(t, "ground", Vec3::new(0.3, 0.28, 0.25), ctx)? * strength,
-        }),
-        other => Err(format!("{ctx}: unknown type '{other}' (color, gradient)")),
+/// `color` (default white) times the black-body colour of `temperature` (Kelvin), if given.
+fn light_color(t: &Table, ctx: &str) -> Result<Vec3, String> {
+    Ok(vec3_or(t, "color", Vec3::ONE, ctx)? * temperature(t, ctx)?.unwrap_or(Vec3::ONE))
+}
+
+/// Black-body colour (luminance 1) of `temperature` in Kelvin.
+fn temperature(t: &Table, ctx: &str) -> Result<Option<Vec3>, String> {
+    match num(t, "temperature", ctx)? {
+        None => Ok(None),
+        Some(k) if (500.0..=50_000.0).contains(&k) => Ok(Some(blackbody_rgb(k as f32))),
+        Some(_) => Err(format!("{ctx}: 'temperature' must be in [500, 50000] Kelvin")),
+    }
+}
+
+/// A unit direction from `key` (must not be zero).
+fn direction(t: &Table, key: &str, ctx: &str) -> Result<Option<Vec3>, String> {
+    match t.get(key) {
+        None => Ok(None),
+        Some(v) => {
+            let d = vec3_value(v, key, ctx)?;
+            if d.length_squared() > 0.0 && d.is_finite() {
+                Ok(Some(d.normalize()))
+            } else {
+                Err(format!("{ctx}: '{key}' must not be zero"))
+            }
+        }
+    }
+}
+
+/// Direction from elevation / azimuth in degrees: azimuth 0 looks down -Z, 90 down +X.
+fn from_angles(elevation: f32, azimuth: f32) -> Vec3 {
+    let (se, ce) = elevation.to_radians().sin_cos();
+    let (sa, ca) = azimuth.to_radians().sin_cos();
+    Vec3::new(sa * ce, se, -ca * ce)
+}
+
+/// `[[lights]]`: point, spot and directional lights.
+fn parse_light(t: &Table, ctx: &str) -> Result<Light, String> {
+    let ty = str_opt(t, "type", ctx)?.ok_or_else(|| format!("{ctx}: missing 'type'"))?;
+    let color = light_color(t, ctx)?;
+    let intensity = f32_or(t, "intensity", 1.0, ctx)?;
+    // Point and spot lights also accept the emitted power of an isotropic source.
+    let radiant_intensity = || -> Result<Vec3, String> {
+        Ok(match num(t, "power", ctx)? {
+            Some(p) => color * (p as f32 / (4.0 * PI)),
+            None => color * intensity,
+        })
+    };
+    match ty {
+        "point" => Ok(Light::Point { pos: vec3_req(t, "position", ctx)?, intensity: radiant_intensity()? }),
+        "spot" | "spotlight" => {
+            let pos = vec3_req(t, "position", ctx)?;
+            let dir = match (direction(t, "direction", ctx)?, t.get("look_at")) {
+                (Some(d), _) => d,
+                (None, Some(v)) => {
+                    let d = vec3_value(v, "look_at", ctx)? - pos;
+                    if d.length_squared() == 0.0 {
+                        return Err(format!("{ctx}: 'look_at' equals 'position'"));
+                    }
+                    d.normalize()
+                }
+                (None, None) => return Err(format!("{ctx}: needs 'direction' or 'look_at'")),
+            };
+            let outer = f32_or(t, "angle", 30.0, ctx)?;
+            let inner = f32_or(t, "inner_angle", outer * 0.8, ctx)?;
+            if !(outer > 0.0 && outer <= 180.0) || inner < 0.0 || inner > outer {
+                return Err(format!("{ctx}: need 0 <= inner_angle <= angle <= 180 (half angles in degrees)"));
+            }
+            Ok(Light::Spot {
+                pos,
+                dir,
+                intensity: radiant_intensity()?,
+                cos_inner: inner.to_radians().cos(),
+                cos_outer: outer.to_radians().cos(),
+            })
+        }
+        "directional" | "distant" | "sun" => {
+            let travel = match direction(t, "direction", ctx)? {
+                Some(d) => d,
+                None => -from_angles(f32_or(t, "elevation", 45.0, ctx)?, f32_or(t, "azimuth", 0.0, ctx)?),
+            };
+            // `intensity` is the irradiance on a surface facing the light.
+            let irradiance = color * intensity;
+            let angle = f32_or(t, "angle", 0.0, ctx)?;
+            if !(0.0..=90.0).contains(&angle) {
+                return Err(format!("{ctx}: 'angle' (angular diameter, degrees) must be in [0, 90]"));
+            }
+            if angle == 0.0 {
+                return Ok(Light::Distant { dir: -travel, radiance: irradiance, cos_max: 1.0 });
+            }
+            let r = (angle * 0.5).to_radians();
+            Ok(Light::Distant { dir: -travel, radiance: irradiance * (1.0 / (PI * r.sin().powi(2))), cos_max: r.cos() })
+        }
+        other => Err(format!("{ctx}: unknown light type '{other}' (point, spot, directional)")),
     }
 }
 
@@ -283,6 +387,69 @@ impl Builder {
         if !self.files.iter().any(|f| f == p) {
             self.files.push(p.to_path_buf());
         }
+    }
+
+    // -------------------------------------------------------------- environment
+
+    /// `[background]`: the environment light, plus the sun for `type = "sky"`.
+    fn parse_background(&mut self, t: &Table, dir: &Path) -> Result<Vec<Light>, String> {
+        let ctx = "[background]";
+        let strength = f32_or(t, "intensity", 1.0, ctx)?;
+        let rotate = match t.get("rotate") {
+            None => Vec3::ZERO,
+            Some(v) if v.as_f64().is_some() => Vec3::new(0.0, v.as_f64().unwrap_or(0.0) as f32, 0.0),
+            Some(v) => vec3_value(v, "rotate", ctx)?,
+        };
+        let mut lights = Vec::new();
+        let source = match str_opt(t, "type", ctx)?.unwrap_or(if t.contains_key("file") { "image" } else { "color" }) {
+            "color" | "constant" => EnvSource::Color(vec3_or(t, "color", Vec3::ZERO, ctx)? * strength),
+            "gradient" => EnvSource::Gradient {
+                zenith: vec3_or(t, "zenith", Vec3::new(0.25, 0.45, 0.9), ctx)? * strength,
+                horizon: vec3_or(t, "horizon", Vec3::new(0.9, 0.95, 1.0), ctx)? * strength,
+                ground: vec3_or(t, "ground", Vec3::new(0.3, 0.28, 0.25), ctx)? * strength,
+            },
+            "image" | "envmap" | "hdri" => {
+                let file = str_opt(t, "file", ctx)?.ok_or_else(|| format!("{ctx}: missing 'file'"))?;
+                let path = dir.join(file);
+                let raw = imageio::load(&path).map_err(|e| format!("{ctx}: {e}"))?;
+                self.track(&path);
+                // Integer images are display-referred sRGB; float images are linear.
+                let srgb = !matches!(raw.pixels, imageio::Pixels::F32(_));
+                let img = Arc::new(TexImage::new(raw, srgb));
+                EnvSource::Image { img, scale: vec3_or(t, "color", Vec3::ONE, ctx)? * strength }
+            }
+            "sky" | "daylight" | "preetham" => {
+                let sun = match direction(t, "sun_direction", ctx)? {
+                    Some(d) => d,
+                    None => from_angles(f32_or(t, "sun_elevation", 45.0, ctx)?, f32_or(t, "sun_azimuth", 0.0, ctx)?),
+                };
+                let turbidity = f32_or(t, "turbidity", 3.0, ctx)?;
+                if !(1.7..=10.0).contains(&turbidity) {
+                    return Err(format!("{ctx}: 'turbidity' must be in [1.7, 10]"));
+                }
+                let ground = vec3_or(t, "ground", Vec3::splat(0.2), ctx)?;
+                let sky = Sky::new(sun, turbidity, strength, ground);
+                if bool_or(t, "sun", true, ctx)? {
+                    let size = f32_or(t, "sun_size", 1.0, ctx)?;
+                    if !(size > 0.0 && size <= 100.0) {
+                        return Err(format!("{ctx}: 'sun_size' must be in (0, 100]"));
+                    }
+                    // A larger disk keeps the sun's irradiance (softer shadows, less noise).
+                    let r = SUN_RADIUS * size;
+                    let radiance = sky.sun_radiance() * ((1.0 - SUN_RADIUS.cos()) / (1.0 - r.cos()));
+                    if !radiance.is_black() {
+                        lights.push(Light::Distant { dir: sky.sun_direction(), radiance, cos_max: r.cos() });
+                    }
+                }
+                EnvSource::Sky(Box::new(sky))
+            }
+            other => return Err(format!("{ctx}: unknown type '{other}' (color, gradient, image, sky)")),
+        };
+        let env = Environment::new(source, rotate);
+        if !env.is_black() {
+            lights.insert(0, Light::Environment(Box::new(env)));
+        }
+        Ok(lights)
     }
 
     // -------------------------------------------------------------- textures
@@ -452,7 +619,11 @@ impl Builder {
                     Vec3::new(s(c.x), s(c.y), s(c.z))
                 };
                 let roughness = self.tex_or(t, &["roughness"], splat(0.0), Scalar, ctx, dir)?;
-                MaterialKind::Dielectric { ior, roughness, absorption }
+                let abbe = f32_or(t, "abbe", 0.0, ctx)?;
+                if abbe < 0.0 {
+                    return Err(format!("{ctx}: 'abbe' must be positive (0 = no dispersion)"));
+                }
+                MaterialKind::Dielectric { ior, abbe, roughness, absorption }
             }
             "plastic" | "coated" => {
                 let ior = f32_or(t, "ior", 1.5, ctx)?;
@@ -487,12 +658,12 @@ impl Builder {
             }
             "emissive" | "light" | "emitter" => {
                 let e = self.tex_or(t, &["emission", "color"], Vec3::ONE, Color, ctx, dir)?;
-                let k = f32_or(t, "intensity", 1.0, ctx)?;
-                #[expect(clippy::float_cmp, reason = "exactly 1.0 means no scaling was requested")]
+                // A black-body colour (luminance 1) multiplies any explicit colour.
+                let k = Vec3::splat(f32_or(t, "intensity", 1.0, ctx)?) * temperature(t, ctx)?.unwrap_or(Vec3::ONE);
                 let emission = match e.constant() {
                     Some(c) => Texture::Const(c * k),
-                    None if k == 1.0 => e,
-                    None => Texture::Scaled(Box::new(e), splat(k)),
+                    None if k == Vec3::ONE => e,
+                    None => Texture::Scaled(Box::new(e), k),
                 };
                 MaterialKind::Emissive { emission, two_sided: bool_or(t, "two_sided", false, ctx)? }
             }
@@ -622,6 +793,7 @@ impl Builder {
         } else if glass {
             MaterialKind::Dielectric {
                 ior: m.ni.filter(|&n| n > 0.0).unwrap_or(1.5),
+                abbe: 0.0,
                 roughness: Texture::Const(Vec3::ZERO),
                 absorption: Vec3::ZERO,
             }

@@ -4,12 +4,14 @@ mod camera;
 mod controls;
 mod deflate;
 mod denoise;
+mod environment;
 mod filter;
 mod geometry;
 mod image;
 mod imageio;
 mod integrator;
 mod jpeg;
+mod lights;
 mod loader;
 mod material;
 mod math;
@@ -21,6 +23,8 @@ mod renderer;
 mod rng;
 mod sampling;
 mod scene;
+mod sky;
+mod spectrum;
 mod texture;
 mod toml;
 
@@ -45,6 +49,7 @@ options:
   --time SECONDS      stop after this much render time
   --noise THRESHOLD   adaptive sampling: stop pixels below this noise level (e.g. 0.02)
   --denoise           also save a denoised image
+  --spectral          hero-wavelength spectral rendering (dispersion, spectral colour mixing)
   --autosave          window mode: save whenever a render finishes
   --scale N           window mode: render at 1/N of the window resolution
 
@@ -57,6 +62,7 @@ window controls (F1 in the window shows them too):
   The scene file (and its meshes) are reloaded automatically when saved.";
 
 #[derive(Clone)]
+#[expect(clippy::struct_excessive_bools, reason = "independent command-line flags")]
 pub(crate) struct Args {
     pub scene: PathBuf,
     pub headless: bool,
@@ -67,6 +73,7 @@ pub(crate) struct Args {
     pub time: Option<f32>,
     pub noise: Option<f32>,
     pub denoise: bool,
+    pub spectral: bool,
     pub autosave: bool,
     pub scale: u32,
 }
@@ -83,6 +90,7 @@ fn parse_args() -> Result<Args, String> {
         time: None,
         noise: None,
         denoise: false,
+        spectral: false,
         autosave: false,
         scale: 1,
     };
@@ -97,6 +105,7 @@ fn parse_args() -> Result<Args, String> {
             "-h" | "--help" => return Err(String::new()),
             "--headless" => a.headless = true,
             "--denoise" => a.denoise = true,
+            "--spectral" => a.spectral = true,
             "--autosave" => a.autosave = true,
             "-o" | "--output" => a.output = Some(PathBuf::from(value(&arg)?)),
             "--spp" => a.spp = Some(value(&arg)?.parse().map_err(|_| "--spp expects an integer")?),
@@ -167,6 +176,7 @@ pub(crate) fn apply_overrides(scene: &mut Scene, args: &Args) {
     if let Some(n) = args.noise {
         s.noise_threshold = n;
     }
+    s.spectral |= args.spectral;
     let o = &mut scene.output;
     if let Some(file) = &args.output {
         o.set_output_arg(file);

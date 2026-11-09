@@ -5,11 +5,11 @@ use crate::camera::CameraDesc;
 use crate::filter::FilterKind;
 use crate::geometry::{Aabb, Sphere, Triangle, intersect_triangle, sphere_roots};
 use crate::image::Tonemap;
+use crate::lights::{Light, LightSampler, LightSamplerKind};
 use crate::material::Material;
 use crate::math::{Frame, PI, Ray, Vec3};
 use crate::output::OutputSettings;
-use crate::rng::{Rng, hash64};
-use crate::sampling::{uniform_sphere, uniform_triangle};
+use crate::rng::hash64;
 use crate::texture::TexCtx;
 
 #[derive(Clone, Debug)]
@@ -40,6 +40,10 @@ pub struct RenderSettings {
     pub min_spp: u32,
     /// Stop after this many seconds of rendering. 0 disables.
     pub time_limit: f32,
+    /// Hero-wavelength spectral rendering instead of RGB.
+    pub spectral: bool,
+    /// How next-event estimation picks a light.
+    pub light_sampler: LightSamplerKind,
 }
 
 impl Default for RenderSettings {
@@ -60,33 +64,8 @@ impl Default for RenderSettings {
             noise_threshold: 0.0,
             min_spp: 16,
             time_limit: 0.0,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum Background {
-    Color(Vec3),
-    /// Simple sky: blends horizon -> zenith above the horizon and horizon -> ground below.
-    Gradient {
-        zenith: Vec3,
-        horizon: Vec3,
-        ground: Vec3,
-    },
-}
-
-impl Background {
-    #[inline]
-    pub fn eval(&self, d: Vec3) -> Vec3 {
-        match *self {
-            Background::Color(c) => c,
-            Background::Gradient { zenith, horizon, ground } => {
-                if d.y >= 0.0 {
-                    horizon.lerp(zenith, d.y.sqrt())
-                } else {
-                    horizon.lerp(ground, (-d.y * 8.0).min(1.0))
-                }
-            }
+            spectral: false,
+            light_sampler: LightSamplerKind::Bvh,
         }
     }
 }
@@ -129,7 +108,7 @@ pub struct Geometry {
 
 /// Latitude-longitude parameterization: u around +Y starting behind the sphere
 /// (u = 0.5 faces +Z), v = 1 at the north pole. Returns (uv, dp/du, dp/dv).
-fn sphere_param(n: Vec3, r: f32) -> ([f32; 2], Vec3, Vec3) {
+pub(crate) fn sphere_param(n: Vec3, r: f32) -> ([f32; 2], Vec3, Vec3) {
     let phi = n.x.atan2(n.z);
     let theta = n.y.clamp(-1.0, 1.0).acos();
     let uv = [0.5 + phi * (0.5 / PI), 1.0 - theta / PI];
@@ -140,18 +119,9 @@ fn sphere_param(n: Vec3, r: f32) -> ([f32; 2], Vec3, Vec3) {
     (uv, dpdu, dpdv)
 }
 
-pub struct LightSample {
-    pub wi: Vec3,
-    pub dist: f32,
-    pub radiance: Vec3,
-    /// Solid-angle pdf (including the light selection probability).
-    pub pdf: f32,
-}
-
 pub struct Scene {
     pub settings: RenderSettings,
     pub camera: CameraDesc,
-    pub background: Background,
     pub materials: Vec<Material>,
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
@@ -165,10 +135,11 @@ pub struct Scene {
     bvh: Bvh,
     /// True if any material has an alpha mask (enables alpha testing in traversal).
     any_alpha: bool,
-    light_prims: Vec<u32>,
-    light_cdf: Vec<f32>,
-    /// Per primitive: (probability of selecting it as a light) / area. Zero for non-emitters.
-    light_pdf_area: Vec<f32>,
+    /// Explicit lights and the environment first, then one area light per emissive primitive.
+    pub(crate) lights: Vec<Light>,
+    pub(crate) light_sampler: LightSampler,
+    /// Light id of each primitive (`lights::NO_LIGHT` for non-emitters).
+    pub(crate) prim_light: Vec<u32>,
 }
 
 /// Primitive ids are `0..triangles.len()` for triangles, followed by spheres.
@@ -176,7 +147,7 @@ impl Scene {
     pub fn new(
         settings: RenderSettings,
         camera: CameraDesc,
-        background: Background,
+        lights: Vec<Light>,
         materials: Vec<Material>,
         geo: Geometry,
     ) -> Scene {
@@ -184,7 +155,6 @@ impl Scene {
         let mut scene = Scene {
             settings,
             camera,
-            background,
             materials,
             positions: geo.positions,
             normals: geo.normals,
@@ -195,13 +165,13 @@ impl Scene {
             output: OutputSettings::default(),
             bvh: Bvh { nodes: Vec::new(), indices: Vec::new() },
             any_alpha,
-            light_prims: Vec::new(),
-            light_cdf: Vec::new(),
-            light_pdf_area: Vec::new(),
+            lights,
+            light_sampler: LightSampler::default(),
+            prim_light: Vec::new(),
         };
         let bounds: Vec<Aabb> = (0..scene.num_prims() as u32).map(|p| scene.prim_bounds(p)).collect();
         scene.bvh = Bvh::build(&bounds);
-        scene.build_lights();
+        scene.build_lights(scene.settings.light_sampler);
         scene
     }
 
@@ -216,22 +186,23 @@ impl Scene {
 
     pub fn stats(&self) -> String {
         format!(
-            "{} triangles, {} spheres, {} materials, {} emitters, BVH {} nodes / depth {}",
+            "{} triangles, {} spheres, {} materials, {} lights ({} emissive primitives), BVH {} nodes / depth {}",
             self.triangles.len(),
             self.spheres.len(),
             self.materials.len(),
-            self.light_prims.len(),
+            self.lights.len(),
+            self.prim_light.iter().filter(|&&l| l != crate::lights::NO_LIGHT).count(),
             self.bvh.nodes.len(),
             self.bvh.depth()
         )
     }
 
     #[inline]
-    fn tri_points(&self, t: &Triangle) -> (Vec3, Vec3, Vec3) {
+    pub(crate) fn tri_points(&self, t: &Triangle) -> (Vec3, Vec3, Vec3) {
         (self.positions[t.v[0] as usize], self.positions[t.v[1] as usize], self.positions[t.v[2] as usize])
     }
 
-    fn prim_bounds(&self, prim: u32) -> Aabb {
+    pub(crate) fn prim_bounds(&self, prim: u32) -> Aabb {
         let mut b = Aabb::EMPTY;
         let nt = self.triangles.len() as u32;
         if prim < nt {
@@ -247,12 +218,12 @@ impl Scene {
         b
     }
 
-    fn prim_material(&self, prim: u32) -> u32 {
+    pub(crate) fn prim_material(&self, prim: u32) -> u32 {
         let nt = self.triangles.len() as u32;
         if prim < nt { self.triangles[prim as usize].material } else { self.spheres[(prim - nt) as usize].material }
     }
 
-    fn prim_area(&self, prim: u32) -> f32 {
+    pub(crate) fn prim_area(&self, prim: u32) -> f32 {
         let nt = self.triangles.len() as u32;
         if prim < nt {
             let (p0, p1, p2) = self.tri_points(&self.triangles[prim as usize]);
@@ -261,34 +232,6 @@ impl Scene {
             let r = self.spheres[(prim - nt) as usize].radius;
             4.0 * PI * r * r
         }
-    }
-
-    fn build_lights(&mut self) {
-        let n = self.num_prims();
-        let mut weights = Vec::new();
-        for prim in 0..n as u32 {
-            let mat = &self.materials[self.prim_material(prim) as usize];
-            if mat.is_emissive() {
-                let area = self.prim_area(prim);
-                let lum = mat.emission_mean().luminance();
-                if lum > 0.0 && area > 0.0 {
-                    self.light_prims.push(prim);
-                    weights.push(f64::from(lum * area));
-                }
-            }
-        }
-        self.light_pdf_area = vec![0.0; n];
-        let total: f64 = weights.iter().sum();
-        let mut acc = 0.0f64;
-        for (i, &prim) in self.light_prims.iter().enumerate() {
-            acc += weights[i];
-            self.light_cdf.push((acc / total) as f32);
-            self.light_pdf_area[prim as usize] = (weights[i] / total) as f32 / self.prim_area(prim);
-        }
-    }
-
-    pub fn has_lights(&self) -> bool {
-        !self.light_prims.is_empty()
     }
 
     #[inline]
@@ -334,7 +277,7 @@ impl Scene {
     }
 
     /// Texture coordinates of a hit (cheaper than a full `interaction`).
-    fn hit_uv(&self, h: &Hit, p: Vec3) -> [f32; 2] {
+    pub(crate) fn hit_uv(&self, h: &Hit, p: Vec3) -> [f32; 2] {
         let nt = self.triangles.len() as u32;
         if h.prim < nt {
             let uv = self.tri_uvs(&self.triangles[h.prim as usize]);
@@ -419,7 +362,7 @@ impl Scene {
     }
 
     /// Returns (geometric normal, shading normal) at barycentrics (b1, b2).
-    fn tri_normals(&self, tri: &Triangle, b1: f32, b2: f32) -> (Vec3, Vec3) {
+    pub(crate) fn tri_normals(&self, tri: &Triangle, b1: f32, b2: f32) -> (Vec3, Vec3) {
         let (p0, p1, p2) = self.tri_points(tri);
         let mut ng = (p1 - p0).cross(p2 - p0).normalize();
         if !tri.has_normals() {
@@ -477,51 +420,5 @@ impl Scene {
             (si.dpdu, si.dpdv) = (f.t, f.b);
         }
         si
-    }
-
-    /// Picks an emitter proportionally to its power and samples a point on it uniformly by area.
-    pub fn sample_light(&self, p: Vec3, rng: &mut Rng) -> Option<LightSample> {
-        if self.light_prims.is_empty() {
-            return None;
-        }
-        let u = rng.f32();
-        let i = self.light_cdf.partition_point(|&c| c <= u).min(self.light_prims.len() - 1);
-        let prim = self.light_prims[i];
-        let nt = self.triangles.len() as u32;
-        let (lp, ln, uv, mat) = if prim < nt {
-            let tri = &self.triangles[prim as usize];
-            let (b1, b2) = uniform_triangle(rng.f32(), rng.f32());
-            let (p0, p1, p2) = self.tri_points(tri);
-            let lp = p0 * (1.0 - b1 - b2) + p1 * b1 + p2 * b2;
-            let uv = self.hit_uv(&Hit { t: 0.0, prim, b1, b2 }, lp);
-            (lp, self.tri_normals(tri, b1, b2).0, uv, tri.material)
-        } else {
-            let s = &self.spheres[(prim - nt) as usize];
-            let n = uniform_sphere(rng.f32(), rng.f32());
-            (s.center + n * s.radius, n, sphere_param(n, s.radius).0, s.material)
-        };
-        let (radiance, two_sided) = self.materials[mat as usize].emission(&TexCtx { uv, p: lp })?;
-        let d = lp - p;
-        let dist2 = d.length_squared();
-        if dist2 <= 0.0 {
-            return None;
-        }
-        let dist = dist2.sqrt();
-        let wi = d * (1.0 / dist);
-        let mut cos_l = -wi.dot(ln);
-        if two_sided {
-            cos_l = cos_l.abs();
-        }
-        if cos_l <= 1e-6 {
-            return None;
-        }
-        let pdf = self.light_pdf_area[prim as usize] * dist2 / cos_l;
-        Some(LightSample { wi, dist, radiance, pdf })
-    }
-
-    /// Solid-angle pdf that `sample_light` would have produced for a point on `prim`.
-    #[inline]
-    pub fn light_pdf(&self, prim: u32, dist2: f32, cos_l: f32) -> f32 {
-        self.light_pdf_area[prim as usize] * dist2 / cos_l.max(1e-8)
     }
 }

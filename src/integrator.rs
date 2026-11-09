@@ -1,9 +1,13 @@
 //! Unidirectional path tracer with next-event estimation and multiple importance sampling.
+//!
+//! The path carries colour either as RGB or as hero-wavelength spectral samples (see
+//! `spectrum.rs`); the light transport code is the same for both.
 
 use crate::math::{Frame, Ray, Vec3, offset_origin};
 use crate::rng::Rng;
 use crate::sampling::power_heuristic;
 use crate::scene::Scene;
+use crate::spectrum::{Channels, Color, Rgb, Wavelengths};
 
 /// One camera path's radiance estimate plus the auxiliary outputs (AOVs) of its
 /// first visible surface, used as denoiser guides and as AOV images.
@@ -25,24 +29,54 @@ fn exp3(v: Vec3) -> Vec3 {
 }
 
 /// Estimates the radiance arriving along `ray`.
-pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> PathSample {
+pub fn radiance(scene: &Scene, ray: Ray, rng: &mut Rng) -> PathSample {
+    if scene.settings.spectral {
+        let mut wl = Wavelengths::sample(rng.f32());
+        let (l, mut out) = trace(scene, ray, rng, &mut wl);
+        out.radiance = wl.to_rgb(l);
+        out
+    } else {
+        let (l, mut out) = trace(scene, ray, rng, &mut Rgb);
+        out.radiance = l;
+        out
+    }
+}
+
+fn trace<Ch: Channels>(scene: &Scene, mut ray: Ray, rng: &mut Rng, ch: &mut Ch) -> (Ch::C, PathSample) {
     let mut out = PathSample::default();
-    let mut l = Vec3::ZERO;
-    let mut beta = Vec3::ONE;
-    // Pdf of the BSDF sample that generated the current ray, for MIS on emitter hits.
+    let mut l = Ch::C::default();
+    let mut beta = Ch::C::splat(1.0);
+    // RGB throughput, only used for the albedo AOV.
+    let mut beta_rgb = Vec3::ONE;
+    // The previous vertex and the pdf of the BSDF sample that left it, for MIS when
+    // a light is hit.
     let mut prev_pdf = 0.0f32;
     let mut prev_delta = true;
+    let (mut prev_p, mut prev_n) = (Vec3::ZERO, Vec3::ZERO);
     // AOVs are recorded once, at the first non-delta vertex (or on escape).
     let mut aov_pending = true;
 
     for depth in 0..scene.settings.max_depth {
         let Some(hit) = scene.intersect(&ray, f32::INFINITY) else {
-            let bg = scene.background.eval(ray.d);
+            // Escaped: infinite lights (environment, sun disk).
+            let mut seen = Vec3::ZERO;
+            for &li in scene.infinite_lights() {
+                let le = scene.lights()[li as usize].le(ray.d);
+                if le.is_black() {
+                    continue;
+                }
+                seen += le;
+                let w = if prev_delta {
+                    1.0
+                } else {
+                    power_heuristic(prev_pdf, scene.infinite_light_pdf(prev_p, prev_n, li, ray.d))
+                };
+                l += beta * ch.uplift(le) * w;
+            }
             if aov_pending {
                 aov_pending = false;
-                out.albedo = beta * bg.max(Vec3::ZERO).min(Vec3::ONE);
+                out.albedo = beta_rgb * seen.max(Vec3::ZERO).min(Vec3::ONE);
             }
-            l += beta * bg;
             break;
         };
         if depth == 0 {
@@ -57,26 +91,32 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> PathSample {
         // side travelled through the interior.
         let sigma = mat.absorption();
         if !sigma.is_black() && wo_world.dot(si.ng) < 0.0 {
-            beta *= exp3(sigma * -hit.t);
+            beta *= ch.transmittance(sigma, hit.t);
+            beta_rgb *= exp3(sigma * -hit.t);
         }
 
         // Emitters: add emission (MIS-weighted against light sampling) and stop.
         if let Some((le, two_sided)) = mat.emission(&ctx) {
             if aov_pending {
                 aov_pending = false;
-                out.albedo = beta * (le / le.max_elem().max(1.0)).max(Vec3::ZERO);
+                out.albedo = beta_rgb * (le / le.max_elem().max(1.0)).max(Vec3::ZERO);
                 out.normal = if wo_world.dot(si.ng) < 0.0 { -si.ng } else { si.ng };
             }
             let cos_l = wo_world.dot(si.ng);
             if cos_l > 0.0 || two_sided {
-                if prev_delta {
-                    l += beta * le;
+                let w = if prev_delta {
+                    1.0
                 } else {
-                    let light_pdf = scene.light_pdf(hit.prim, hit.t * hit.t, cos_l.abs());
-                    l += beta * le * power_heuristic(prev_pdf, light_pdf);
-                }
+                    power_heuristic(prev_pdf, scene.area_light_pdf(prev_p, prev_n, hit.prim, si.p, si.ng))
+                };
+                l += beta * ch.uplift(le) * w;
             }
             break;
+        }
+
+        // Wavelength-dependent refraction: only the hero wavelength can follow the path.
+        if mat.is_dispersive() {
+            ch.terminate_secondary();
         }
 
         // Opaque surfaces are two-sided: shade the side the ray arrived from.
@@ -90,27 +130,26 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> PathSample {
         }
         let frame = Frame::from_normal(ns);
         let wo = frame.to_local(wo_world);
-        let bsdf = mat.bsdf(&ctx, wo);
+        let bsdf = mat.bsdf(&ctx, wo, ch.hero());
         if aov_pending && !bsdf.is_delta() {
             aov_pending = false;
-            out.albedo = beta * bsdf.albedo();
+            out.albedo = beta_rgb * bsdf.albedo();
             out.normal = ns;
         }
 
-        // Next-event estimation: sample a point on a light directly.
+        // Next-event estimation: sample a light directly.
         if !bsdf.is_delta()
             && scene.has_lights()
-            && let Some(ls) = scene.sample_light(si.p, rng)
+            && let Some(ls) = scene.sample_light(si.p, ns, rng)
         {
             let wi = frame.to_local(ls.wi);
             let geo = ls.wi.dot(ng);
             // Both normals must agree on the side, and opaque surfaces only reflect.
             if geo * wi.z > 0.0 && (transmissive || geo > 0.0) {
                 let (f, bsdf_pdf) = bsdf.eval(wo, wi);
-                let origin = offset_origin(si.p, ng, ls.wi);
-                if !f.is_black() && !scene.occluded(&Ray::new(origin, ls.wi), ls.dist * (1.0 - 1e-3)) {
-                    let w = power_heuristic(ls.pdf, bsdf_pdf);
-                    l += beta * f * ls.radiance * (w / ls.pdf);
+                if !f.is_black() && !scene.occluded_light(si.p, ng, &ls) {
+                    let w = if ls.delta { 1.0 } else { power_heuristic(ls.pdf, bsdf_pdf) };
+                    l += beta * ch.uplift(f) * ch.uplift(ls.radiance) * (w / ls.pdf);
                 }
             }
         }
@@ -121,12 +160,14 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> PathSample {
         if wi_world.dot(ng) * bs.wi.z <= 0.0 {
             break; // shading and geometric normal disagree about the side
         }
-        beta *= bs.weight;
+        beta *= ch.uplift(bs.weight);
+        beta_rgb *= bs.weight;
         if beta.is_black() || !beta.is_finite() {
             break;
         }
         prev_pdf = bs.pdf;
         prev_delta = bs.delta;
+        (prev_p, prev_n) = (si.p, ns);
         ray = Ray::new(offset_origin(si.p, ng, wi_world), wi_world);
 
         // Russian roulette.
@@ -135,13 +176,12 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Rng) -> PathSample {
             if rng.f32() >= q {
                 break;
             }
-            beta /= q;
+            beta *= 1.0 / q;
         }
     }
     // A path that ended on delta surfaces only: fall back to the last throughput.
     if aov_pending {
-        out.albedo = beta.max(Vec3::ZERO).min(Vec3::ONE);
+        out.albedo = beta_rgb.max(Vec3::ZERO).min(Vec3::ONE);
     }
-    out.radiance = l;
-    out
+    (l, out)
 }
