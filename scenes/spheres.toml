@@ -1,0 +1,77 @@
+# Outdoor material showcase under a gradient sky with an emissive "sun" sphere.
+
+[render]
+width = 1280
+height = 720
+spp = 256
+max_depth = 12
+exposure = 0.0
+tonemap = "aces"
+
+[camera]
+position = [0, 1.4, 6]
+look_at = [0, 0.7, 0]
+fov = 35
+aperture = 0.08        # thin-lens depth of field
+# focus_distance defaults to the distance to look_at
+
+[background]
+type = "gradient"
+zenith = [0.25, 0.45, 0.9]
+horizon = [0.85, 0.9, 1.0]
+ground = [0.3, 0.28, 0.25]
+intensity = 0.8
+
+[materials.ground]
+type = "diffuse"
+albedo = [0.5, 0.5, 0.5]
+
+[materials.sun]
+type = "light"
+emission = [1.0, 0.9, 0.75]
+intensity = 400
+
+[[objects]]   # ground plane
+type = "quad"
+origin = [-50, 0, -50]
+u = [100, 0, 0]
+v = [0, 0, 100]
+material = "ground"
+
+[[objects]]
+type = "sphere"
+center = [20, 30, -20]
+radius = 2
+material = "sun"
+
+[[objects]]
+type = "sphere"
+center = [-2.4, 0.7, 0]
+radius = 0.7
+material = { type = "diffuse", albedo = [0.8, 0.25, 0.2] }
+
+[[objects]]
+type = "sphere"
+center = [-0.8, 0.7, 0]
+radius = 0.7
+material = { type = "metal", color = [0.95, 0.93, 0.88], roughness = 0.0 }
+
+[[objects]]
+type = "sphere"
+center = [0.8, 0.7, 0]
+radius = 0.7
+material = { type = "glass", ior = 1.5 }
+
+[[objects]]
+type = "sphere"
+center = [2.4, 0.7, 0]
+radius = 0.7
+material = { type = "metal", color = [0.95, 0.64, 0.54], roughness = 0.35 }
+
+[[objects]]   # small cube in front, from a mesh file
+type = "mesh"
+file = "models/box.obj"
+material = { type = "diffuse", albedo = [0.2, 0.35, 0.75] }
+scale = 0.5
+rotate = [0, 40, 0]
+translate = [0.0, 0.25, 1.5]

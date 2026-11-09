@@ -1,0 +1,17 @@
+[package]
+name = "pathtracer"
+version = "0.1.0"
+edition = "2024"
+description = "A progressive, physically based path tracer with zero external dependencies"
+
+# Intentionally empty: everything is implemented on top of `std`.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Path tracing in an unoptimized build is painfully slow; keep dev builds usable.
+[profile.dev]
+opt-level = 2
