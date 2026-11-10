@@ -147,7 +147,7 @@ fn trace<Ch: Channels>(scene: &Scene, mut ray: Ray, rng: &mut Rng, ch: &mut Ch) 
             // Both normals must agree on the side, and opaque surfaces only reflect.
             if geo * wi.z > 0.0 && (transmissive || geo > 0.0) {
                 let (f, bsdf_pdf) = bsdf.eval(wo, wi);
-                if !f.is_black() && !scene.occluded_light(si.p, ng, &ls) {
+                if !f.is_black() && !scene.occluded_light(si.p, ng, &ls, ray.time) {
                     let w = if ls.delta { 1.0 } else { power_heuristic(ls.pdf, bsdf_pdf) };
                     l += beta * ch.uplift(f) * ch.uplift(ls.radiance) * (w / ls.pdf);
                 }
@@ -168,7 +168,7 @@ fn trace<Ch: Channels>(scene: &Scene, mut ray: Ray, rng: &mut Rng, ch: &mut Ch) 
         prev_pdf = bs.pdf;
         prev_delta = bs.delta;
         (prev_p, prev_n) = (si.p, ns);
-        ray = Ray::new(offset_origin(si.p, ng, wi_world), wi_world);
+        ray = Ray::new(offset_origin(si.p, ng, wi_world), wi_world, ray.time);
 
         // Russian roulette.
         if depth >= 3 {

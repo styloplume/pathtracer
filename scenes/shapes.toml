@@ -1,0 +1,171 @@
+# Geometry showcase: analytic shapes (disks, cylinders, boxes, spheres), a glTF model,
+# STL pawns placed as instances, motion blur and a shared material library.
+
+include = "lib/materials.toml"   # white, gray, gold, chrome, glass, rubber, ...
+
+[render]
+width = 1280
+height = 720
+spp = 512
+max_depth = 10
+noise_threshold = 0.02
+
+[camera]
+position = [0, 2.4, 8.5]
+look_at = [0, 0.75, 0]
+fov = 32
+# Other projections ("perspective" is the default):
+# projection = "orthographic"   # ortho_height = 5 (default: the perspective view's height at look_at)
+# projection = "fisheye"        # fov = 180 across the image circle
+# projection = "equirect"       # 360 x 180 panorama; use a 2:1 image
+# A physical camera instead of fov / aperture: focal length (mm, 24 mm sensor height),
+# f-number (lens aperture; scene units are meters) and, with iso / shutter_speed, exposure.
+# focal_length = 50
+# f_stop = 2.8
+# Shutter interval in frame time; object and camera motion keys sit at 0 and 1.
+shutter = [0, 1]
+# motion = { position = [0.3, 2.4, 8.5] }   # camera at the end of the frame
+
+[background]
+type = "gradient"
+zenith = [0.12, 0.14, 0.18]
+horizon = [0.3, 0.3, 0.32]
+ground = [0.05, 0.05, 0.05]
+
+[materials.studio]
+type = "diffuse"
+albedo = { type = "checker", even = 0.55, odd = 0.45, scale = 1, space = "world" }
+
+# --- Prototypes: geometry placed by instances ---------------------------------------
+
+[prototypes.pawn]              # a single-object prototype: just a mesh file
+file = "models/pawn.stl"       # binary STL (STL files are often in mm: scale accordingly)
+material = "white"
+
+[[prototypes.wheel.objects]]   # several objects make one prototype
+type = "cylinder"              # the tyre: a short, capped cylinder around the z axis
+base = [0, 0, -0.12]
+axis = [0, 0, 1]
+height = 0.24
+radius = 0.55
+material = "rubber"
+
+[[prototypes.wheel.objects]]
+type = "cylinder"              # hub
+base = [0, 0, -0.14]
+axis = [0, 0, 1]
+height = 0.28
+radius = 0.12
+material = "chrome"
+
+[[prototypes.wheel.objects]]
+type = "box"                   # rim marking, so the spin is visible
+center = [0, 0.38, 0.125]
+size = [0.08, 0.3, 0.01]
+material = "gold"
+
+[[prototypes.wheel.objects]]
+type = "disk"                  # rim face
+center = [0, 0, 0.121]
+normal = [0, 0, 1]
+radius = 0.42
+inner_radius = 0.12
+material = "brushed_aluminium"
+
+# --- Studio -------------------------------------------------------------------------
+
+[[objects]]   # floor: an analytic box
+type = "box"
+min = [-12, -0.2, -12]
+max = [12, 0, 12]
+material = "studio"
+
+[[objects]]   # softbox: a round area light, emitting along its normal
+type = "disk"
+center = [-1.5, 5, 2.5]
+normal = [0.25, -1, -0.3]
+radius = 1.2
+material = { type = "light", temperature = 5600, intensity = 9 }
+
+[[objects]]   # warm ring light behind the scene (an annulus)
+type = "disk"
+center = [0, 2.2, -4]
+normal = [0, 0, 1]
+radius = 1.6
+inner_radius = 1.45
+material = "warm_light"
+
+# --- Shapes -------------------------------------------------------------------------
+
+[[objects]]   # a glTF 2.0 model (external .bin, embedded PNG texture, principled material)
+type = "mesh"
+file = "models/knot.gltf"
+scale = 0.8
+translate = [0, 0.95, -0.6]
+
+[[objects]]   # solid glass rod: a capped cylinder
+type = "cylinder"
+base = [-2.3, 0, 0.3]
+height = 1.6
+radius = 0.28
+material = "glass"
+
+[[objects]]   # open copper tube, tilted
+type = "cylinder"
+base = [-1.6, 0.25, 1.6]
+axis = [1, 0.15, -0.2]
+height = 1.1
+radius = 0.25
+capped = false
+material = "copper"
+
+[[objects]]   # a box, scaled and rotated by the object transform
+type = "box"
+size = 1
+scale = [1.1, 0.5, 0.7]
+rotate = [0, 25, 0]
+translate = [2.4, 0.25, -0.4]
+material = "red_plastic"
+
+[[objects]]
+type = "box"
+size = 0.45
+rotate = [0, -15, 0]
+translate = [2.3, 0.725, -0.5]
+material = "marble"
+
+[[objects]]   # a sphere squashed by a non-uniform scale (becomes an instance)
+type = "sphere"
+radius = 0.35
+scale = [1.4, 0.7, 1.4]
+translate = [1.2, 0.245, 1.6]
+material = "gold"
+
+# --- Instances and motion blur ------------------------------------------------------
+
+[[objects]]
+type = "instance"
+prototype = "pawn"
+translate = [-0.6, 0, 1.8]
+scale = 0.8
+
+[[objects]]   # a pawn sliding to the right during the frame
+type = "instance"
+prototype = "pawn"
+translate = [0.1, 0, 2.1]
+scale = 0.8
+motion = { translate = [0.35, 0, 2.1] }
+
+[[objects]]   # a spinning wheel
+type = "instance"
+prototype = "wheel"
+translate = [3.0, 0.55, 1.2]
+rotate = [0, -30, 0]
+motion = { rotate = [0, -30, -120] }
+
+[[objects]]   # a ball bouncing up through the frame
+type = "sphere"
+center = [-0.9, 0.3, 3.1]
+radius = 0.3
+material = "blue_plastic"
+motion = { translate = [0, 0.5, 0] }

@@ -1,10 +1,12 @@
 //! Light sources and light selection.
 //!
-//! Lights are emissive primitives (area lights), point / spot lights, distant lights
+//! Lights are emissive primitives of the static world geometry (area lights; emitters
+//! inside instances are only found by BSDF sampling), point / spot lights, distant lights
 //! (directional, optionally with an angular size, e.g. the sun) and the environment.
 //! Next-event estimation first picks a light, then samples a direction towards it:
 //!
-//! - spheres: uniform in the cone they subtend (solid-angle sampling);
+//! - spheres: uniform in the cone they subtend (solid-angle sampling); disks, cylinders
+//!   and boxes: uniform by area;
 //! - triangles: uniform in their spherical triangle (Arvo), falling back to area
 //!   sampling for tiny or huge solid angles;
 //! - distant lights with a size: uniform in their cone; the environment: by luminance.
@@ -19,10 +21,11 @@ use crate::geometry::Aabb;
 use crate::math::{Frame, PI, Ray, Vec3, offset_origin};
 use crate::rng::Rng;
 use crate::sampling::{
-    ONE_MINUS_EPSILON, angle_between, sample_spherical_triangle, spherical_triangle_area, uniform_cone, uniform_sphere,
+    ONE_MINUS_EPSILON, angle_between, sample_spherical_triangle, spherical_triangle_area, uniform_cone,
     uniform_triangle,
 };
 use crate::scene::{Hit, Scene};
+use crate::shapes::{ShapeKind, sphere_param};
 use crate::texture::TexCtx;
 
 pub enum Light {
@@ -148,14 +151,14 @@ impl Scene {
     /// The ray leaves from the offset origin and aims at the sampled point itself: reusing
     /// `ls.wi` from the offset origin would miss the light point by the offset and could
     /// hit the light's own surface first when the light is very close.
-    pub fn occluded_light(&self, p: Vec3, ng: Vec3, ls: &LightSample) -> bool {
+    pub fn occluded_light(&self, p: Vec3, ng: Vec3, ls: &LightSample, time: f32) -> bool {
         let origin = offset_origin(p, ng, ls.wi);
         if !ls.dist.is_finite() {
-            return self.occluded(&Ray::new(origin, ls.wi), f32::INFINITY);
+            return self.occluded(&Ray::new(origin, ls.wi, time), f32::INFINITY);
         }
         let d = (p + ls.wi * ls.dist) - origin;
         let dist = d.length();
-        dist > 0.0 && self.occluded(&Ray::new(origin, d * (1.0 / dist)), dist * (1.0 - 1e-3))
+        dist > 0.0 && self.occluded(&Ray::new(origin, d * (1.0 / dist), time), dist * (1.0 - 1e-3))
     }
 
     /// Picks a light for shading point `p` with normal `n` (zero if none) and samples
@@ -218,27 +221,15 @@ impl Scene {
     }
 
     fn sample_area_light(&self, prim: u32, p: Vec3, u1: f32, u2: f32) -> Option<LightSample> {
-        let nt = self.triangles.len() as u32;
-        let (lp, ln, uv, mat, pdf_solid) = if prim < nt {
-            let tri = &self.triangles[prim as usize];
-            let (p0, p1, p2) = self.tri_points(tri);
-            let omega = spherical_triangle_area([p0, p1, p2], p);
-            let (b1, b2, pdf_solid) = if (MIN_SPHERICAL_AREA..=MAX_SPHERICAL_AREA).contains(&omega) {
-                let (b1, b2) = sample_spherical_triangle([p0, p1, p2], p, u1, u2)?;
-                (b1, b2, Some(1.0 / omega))
-            } else {
-                let (b1, b2) = uniform_triangle(u1, u2);
-                (b1, b2, None)
+        let (lp, ln, uv, mat, pdf_solid) = if let Some(s) = self.shape(prim) {
+            let cone = match s.kind {
+                ShapeKind::Sphere { center, radius } => sphere_cone(center, radius, p).map(|c| (center, radius, c)),
+                _ => None,
             };
-            let lp = p0 * (1.0 - b1 - b2) + p1 * b1 + p2 * b2;
-            let uv = self.hit_uv(&Hit { t: 0.0, prim, b1, b2 }, lp);
-            (lp, self.tri_normals(tri, b1, b2).0, uv, tri.material, pdf_solid)
-        } else {
-            let s = &self.spheres[(prim - nt) as usize];
-            if let Some((cos_max, one_minus)) = sphere_cone(s.center, s.radius, p) {
+            if let Some((center, radius, (cos_max, one_minus))) = cone {
                 // Sample the cone, then find the point on the sphere it hits (pbrt-v4).
-                let dc = (p - s.center).length();
-                let sin_max = s.radius / dc;
+                let dc = (p - center).length();
+                let sin_max = radius / dc;
                 let sin2_max = sin_max * sin_max;
                 let (cos_t, sin2_t) = if sin2_max < 0.000_685_23 {
                     let s2 = sin2_max * u1;
@@ -251,13 +242,27 @@ impl Scene {
                 let sin_alpha = (1.0 - cos_alpha * cos_alpha).max(0.0).sqrt();
                 let phi = u2 * 2.0 * PI;
                 let w = Vec3::new(sin_alpha * phi.cos(), sin_alpha * phi.sin(), cos_alpha);
-                let n = Frame::from_normal((s.center - p) * (1.0 / dc)).to_world(-w);
-                let lp = s.center + n * s.radius;
-                (lp, n, crate::scene::sphere_param(n, s.radius).0, s.material, Some(1.0 / (2.0 * PI * one_minus)))
+                let n = Frame::from_normal((center - p) * (1.0 / dc)).to_world(-w);
+                let lp = center + n * radius;
+                (lp, n, sphere_param(n, radius).0, s.material, Some(1.0 / (2.0 * PI * one_minus)))
             } else {
-                let n = uniform_sphere(u1, u2);
-                (s.center + n * s.radius, n, crate::scene::sphere_param(n, s.radius).0, s.material, None)
+                let (lp, n) = s.kind.sample(u1, u2);
+                (lp, n, s.kind.surface(lp).uv, s.material, None)
             }
+        } else {
+            let tri = &self.triangles[prim as usize];
+            let (p0, p1, p2) = self.tri_points(tri);
+            let omega = spherical_triangle_area([p0, p1, p2], p);
+            let (b1, b2, pdf_solid) = if (MIN_SPHERICAL_AREA..=MAX_SPHERICAL_AREA).contains(&omega) {
+                let (b1, b2) = sample_spherical_triangle([p0, p1, p2], p, u1, u2)?;
+                (b1, b2, Some(1.0 / omega))
+            } else {
+                let (b1, b2) = uniform_triangle(u1, u2);
+                (b1, b2, None)
+            };
+            let lp = p0 * (1.0 - b1 - b2) + p1 * b1 + p2 * b2;
+            let uv = self.hit_uv(&Hit { t: 0.0, prim, inst: 0, b1, b2 }, lp);
+            (lp, self.tri_normals(tri, b1, b2).0, uv, tri.material, pdf_solid)
         };
         let (radiance, two_sided) = self.materials[mat as usize].emission(&TexCtx { uv, p: lp })?;
         let d = lp - p;
@@ -295,14 +300,16 @@ impl Scene {
             let cos_l = (d.dot(nl) / dist2.sqrt()).abs();
             dist2 / (cos_l.max(1e-8) * self.prim_area(prim))
         };
-        let nt = self.triangles.len() as u32;
-        let pdf = if prim < nt {
-            let (p0, p1, p2) = self.tri_points(&self.triangles[prim as usize]);
-            let omega = spherical_triangle_area([p0, p1, p2], p);
-            if (MIN_SPHERICAL_AREA..=MAX_SPHERICAL_AREA).contains(&omega) { 1.0 / omega } else { area_pdf() }
-        } else {
-            let s = &self.spheres[(prim - nt) as usize];
-            sphere_cone(s.center, s.radius, p).map_or_else(area_pdf, |(_, om)| 1.0 / (2.0 * PI * om))
+        let pdf = match self.shape(prim).map(|s| s.kind) {
+            None => {
+                let (p0, p1, p2) = self.tri_points(&self.triangles[prim as usize]);
+                let omega = spherical_triangle_area([p0, p1, p2], p);
+                if (MIN_SPHERICAL_AREA..=MAX_SPHERICAL_AREA).contains(&omega) { 1.0 / omega } else { area_pdf() }
+            }
+            Some(ShapeKind::Sphere { center, radius }) => {
+                sphere_cone(center, radius, p).map_or_else(area_pdf, |(_, om)| 1.0 / (2.0 * PI * om))
+            }
+            Some(_) => area_pdf(),
         };
         pmf * pdf
     }
@@ -322,14 +329,13 @@ impl Scene {
                     None => return None,
                 };
                 let phi = lum * self.prim_area(*prim) * if two_sided { 2.0 } else { 1.0 };
-                let nt = self.triangles.len() as u32;
-                if *prim < nt {
-                    let tri = &self.triangles[*prim as usize];
-                    let w = self.tri_normals(tri, 1.0 / 3.0, 1.0 / 3.0).0;
-                    LightBounds { bounds: self.prim_bounds(*prim), w, phi, cos_o: 1.0, cos_e: 0.0, two_sided }
-                } else {
-                    LightBounds { bounds: self.prim_bounds(*prim), w: Vec3::Z, phi, cos_o: -1.0, cos_e: 0.0, two_sided }
-                }
+                // Flat emitters emit into the hemisphere of their normal, curved ones everywhere.
+                let (w, cos_o) = match self.shape(*prim).map(|s| s.kind) {
+                    None => (self.tri_normals(&self.triangles[*prim as usize], 1.0 / 3.0, 1.0 / 3.0).0, 1.0),
+                    Some(ShapeKind::Disk { frame, .. }) => (frame.n, 1.0),
+                    Some(_) => (Vec3::Z, -1.0),
+                };
+                LightBounds { bounds: self.prim_bounds(*prim), w, phi, cos_o, cos_e: 0.0, two_sided }
             }
             Light::Point { pos, intensity } => LightBounds {
                 bounds: Aabb { min: *pos, max: *pos },
@@ -352,11 +358,11 @@ impl Scene {
         (lb.phi > 0.0 && lb.phi.is_finite()).then_some(lb)
     }
 
-    /// Adds area lights for emissive primitives and builds the light sampler.
-    pub(crate) fn build_lights(&mut self, kind: LightSamplerKind) {
-        let n = self.num_prims();
-        self.prim_light = vec![NO_LIGHT; n];
-        for prim in 0..n as u32 {
+    /// Adds area lights for the emissive primitives among `prims` (world-space ones)
+    /// and builds the light sampler.
+    pub(crate) fn build_lights(&mut self, kind: LightSamplerKind, prims: &[u32]) {
+        self.prim_light = vec![NO_LIGHT; self.num_prims()];
+        for &prim in prims {
             let mat = &self.materials[self.prim_material(prim) as usize];
             if mat.is_emissive() && mat.emission_mean().luminance() > 0.0 && self.prim_area(prim) > 0.0 {
                 self.prim_light[prim as usize] = self.lights.len() as u32;
@@ -827,7 +833,7 @@ mod tests {
         for _ in 0..2000 {
             if let Some(ls) = scene.sample_light(p, n, &mut rng) {
                 total += 1;
-                if !scene.occluded_light(p, n, &ls) {
+                if !scene.occluded_light(p, n, &ls, 0.0) {
                     lit += 1;
                 }
             }

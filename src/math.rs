@@ -151,12 +151,14 @@ impl Neg for Vec3 {
 pub struct Ray {
     pub o: Vec3,
     pub d: Vec3,
+    /// Time within the frame (motion keys sit at 0 and 1); every ray of a path shares it.
+    pub time: f32,
 }
 
 impl Ray {
     #[inline]
-    pub fn new(o: Vec3, d: Vec3) -> Self {
-        Ray { o, d }
+    pub fn new(o: Vec3, d: Vec3, time: f32) -> Self {
+        Ray { o, d, time }
     }
 }
 
@@ -201,6 +203,26 @@ pub struct Mat3 {
 }
 
 impl Mat3 {
+    pub const IDENTITY: Mat3 = Mat3 { m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] };
+
+    pub fn col(&self, j: usize) -> Vec3 {
+        Vec3::new(self.m[0][j], self.m[1][j], self.m[2][j])
+    }
+    /// Rotation by a unit quaternion (x, y, z, w).
+    pub fn from_quat(q: [f32; 4]) -> Mat3 {
+        let [x, y, z, w] = q;
+        Mat3 {
+            m: [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ],
+        }
+    }
+    /// Rotation about X, then Y, then Z (degrees).
+    pub fn rotate_xyz(deg: Vec3) -> Mat3 {
+        Mat3::rotate_z(deg.z).mul(&Mat3::rotate_y(deg.y)).mul(&Mat3::rotate_x(deg.x))
+    }
     pub fn scale(s: Vec3) -> Mat3 {
         Mat3 { m: [[s.x, 0.0, 0.0], [0.0, s.y, 0.0], [0.0, 0.0, s.z]] }
     }
@@ -272,34 +294,116 @@ impl Mat3 {
     }
 }
 
-/// Affine transform: scale, then rotate (X, then Y, then Z, in degrees), then translate.
+/// Affine transform `p -> m p + t`, with its inverse and normal matrix.
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
     pub m: Mat3,
     pub t: Vec3,
+    inv: Mat3,
     normal_m: Mat3,
 }
 
 impl Transform {
-    pub fn new(translate: Vec3, rotate_deg: Vec3, scale: Vec3) -> Result<Transform, String> {
-        let m = Mat3::rotate_z(rotate_deg.z)
-            .mul(&Mat3::rotate_y(rotate_deg.y))
-            .mul(&Mat3::rotate_x(rotate_deg.x))
-            .mul(&Mat3::scale(scale));
+    pub const IDENTITY: Transform =
+        Transform { m: Mat3::IDENTITY, t: Vec3::ZERO, inv: Mat3::IDENTITY, normal_m: Mat3::IDENTITY };
+
+    pub fn from_matrix(m: Mat3, t: Vec3) -> Result<Transform, String> {
         let inv = m.inverse().ok_or("transform is degenerate (zero scale?)")?;
-        Ok(Transform { m, t: translate, normal_m: inv.transpose() })
+        Ok(Transform { m, t, inv, normal_m: inv.transpose() })
+    }
+    /// `self` followed by `outer`.
+    pub fn then(&self, outer: &Transform) -> Transform {
+        let m = outer.m.mul(&self.m);
+        let inv = self.inv.mul(&outer.inv);
+        Transform { m, t: outer.m.mul_vec(self.t) + outer.t, inv, normal_m: inv.transpose() }
     }
     #[inline]
     pub fn point(&self, p: Vec3) -> Vec3 {
         self.m.mul_vec(p) + self.t
     }
     #[inline]
+    pub fn vector(&self, v: Vec3) -> Vec3 {
+        self.m.mul_vec(v)
+    }
+    #[inline]
     pub fn normal(&self, n: Vec3) -> Vec3 {
         self.normal_m.mul_vec(n).normalize()
+    }
+    #[inline]
+    pub fn inv_point(&self, p: Vec3) -> Vec3 {
+        self.inv.mul_vec(p - self.t)
+    }
+    #[inline]
+    pub fn inv_vector(&self, v: Vec3) -> Vec3 {
+        self.inv.mul_vec(v)
     }
     /// True if the transform mirrors geometry (triangle winding must be flipped).
     pub fn flips_handedness(&self) -> bool {
         self.m.determinant() < 0.0
+    }
+    pub fn is_identity(&self) -> bool {
+        self.m == Mat3::IDENTITY && self.t == Vec3::ZERO
+    }
+    /// The scale factor if the linear part is a rotation (or mirror) times a uniform scale.
+    pub fn uniform_scale(&self) -> Option<f32> {
+        let c = [self.m.col(0), self.m.col(1), self.m.col(2)];
+        let s2 = c[0].length_squared();
+        let tol = 1e-5 * s2;
+        let ok = (c[1].length_squared() - s2).abs() <= tol
+            && (c[2].length_squared() - s2).abs() <= tol
+            && c[0].dot(c[1]).abs() <= tol
+            && c[1].dot(c[2]).abs() <= tol
+            && c[0].dot(c[2]).abs() <= tol;
+        ok.then(|| s2.sqrt())
+    }
+}
+
+/// Translate / rotate (degrees, X then Y then Z) / scale parameters, as written in
+/// scene files; motion blur interpolates them linearly (so large rotations spin).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Trs {
+    pub translate: Vec3,
+    pub rotate: Vec3,
+    pub scale: Vec3,
+}
+
+impl Trs {
+    pub const IDENTITY: Trs = Trs { translate: Vec3::ZERO, rotate: Vec3::ZERO, scale: Vec3::ONE };
+
+    #[inline]
+    pub fn lerp(&self, o: &Trs, t: f32) -> Trs {
+        Trs {
+            translate: self.translate.lerp(o.translate, t),
+            rotate: self.rotate.lerp(o.rotate, t),
+            scale: self.scale.lerp(o.scale, t),
+        }
+    }
+
+    /// The transform, built without a general matrix inverse (fast enough per ray).
+    pub fn transform(&self) -> Result<Transform, String> {
+        let s = self.scale;
+        if s.x == 0.0 || s.y == 0.0 || s.z == 0.0 || !s.is_finite() {
+            return Err("transform is degenerate (zero scale?)".into());
+        }
+        Ok(self.transform_unchecked())
+    }
+
+    /// `transform` for a scale already known to be non-zero.
+    #[inline]
+    pub fn transform_unchecked(&self) -> Transform {
+        let r = Mat3::rotate_xyz(self.rotate);
+        let s = self.scale;
+        let is = Vec3::new(1.0 / s.x, 1.0 / s.y, 1.0 / s.z);
+        let mut m = r;
+        let mut normal_m = r;
+        for row in 0..3 {
+            for j in 0..3 {
+                m.m[row][j] *= s[j];
+                normal_m.m[row][j] *= is[j];
+            }
+        }
+        // inv = S^-1 R^T, the transpose of the normal matrix.
+        Transform { m, t: self.translate, inv: normal_m.transpose(), normal_m }
     }
 }
 
@@ -315,6 +419,30 @@ mod tests {
             let v = Vec3::new(0.3, -0.5, 0.8);
             assert!((f.to_world(f.to_local(v)) - v).length() < 1e-5);
         }
+    }
+
+    #[test]
+    fn transforms_compose_and_invert() {
+        let a = Trs {
+            translate: Vec3::new(1.0, -2.0, 3.0),
+            rotate: Vec3::new(30.0, -60.0, 10.0),
+            scale: Vec3::new(2.0, 0.5, -1.5),
+        }
+        .transform()
+        .unwrap();
+        let b = Transform::from_matrix(Mat3::from_quat([0.0, 0.0, 0.382_683_4, 0.923_879_5]), Vec3::new(0.0, 5.0, 0.0))
+            .unwrap();
+        let ab = a.then(&b);
+        let p = Vec3::new(0.3, -0.7, 1.1);
+        assert!((ab.point(p) - b.point(a.point(p))).length() < 1e-5);
+        assert!((ab.inv_point(ab.point(p)) - p).length() < 1e-5);
+        assert!((a.inv_vector(a.vector(p)) - p).length() < 1e-5);
+        // Normals stay perpendicular to transformed tangents.
+        let (n, tangent) = (Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 2.0, 0.0));
+        assert!(ab.normal(n).dot(ab.vector(tangent)).abs() < 1e-5);
+        assert!(a.flips_handedness() && !b.flips_handedness());
+        assert_eq!(b.uniform_scale().map(|s| (s * 1e4).round()), Some(1e4));
+        assert!(a.uniform_scale().is_none());
     }
 
     #[test]

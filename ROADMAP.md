@@ -88,16 +88,21 @@ uplift); bilinear-warped (cosine-aware) spherical-triangle sampling; light sampl
 rectangles; textured-emission-aware light power; MIS-compensated environment sampling; light-path guiding for
 caustics through dispersive glass.
 
-## M5 — Geometry & scenes
+## M5 — Geometry & scenes ✅
 
-- [ ] Instancing (one mesh, many transforms) with a two-level BVH
-- [ ] Scene includes / reusable material libraries
-- [ ] More formats: glTF 2.0 (JSON + binary; own JSON parser), maybe STL
-- [ ] Watertight ray/triangle intersection
-- [ ] Wider BVH (BVH4/8) and SIMD-friendly layout; BVH build parallelization
-- [ ] Analytic primitives: disks, cylinders, boxes
-- [ ] Motion blur (camera + object transforms over shutter interval)
-- [ ] Camera models: orthographic, fisheye/equirect, physical (f-stop, ISO, shutter)
+- [x] Instancing with a two-level BVH: `[prototypes]` placed by `type = "instance"` objects, `scatter` for thousands at once
+- [x] Scene includes (`include = [...]`, merged with per-entry directories) and a reusable material library (`scenes/lib/materials.toml`)
+- [x] More formats: glTF 2.0 (`.gltf` / `.glb`, own JSON parser, metallic-roughness materials and textures) and STL (ASCII / binary)
+- [x] Watertight ray/triangle intersection (Woop, Benthin & Wald 2013)
+- [x] 4-wide BVH with structure-of-arrays child bounds (auto-vectorized slab tests); parallel binned-SAH build
+- [x] Analytic primitives: disks / annuli, cylinders, oriented boxes (all area-light capable); transforms for every object
+- [x] Motion blur: object / instance TRS keys and camera motion over the shutter interval
+- [x] Camera models: orthographic, fisheye, equirectangular; physical focal length, f-stop, ISO, shutter speed
+
+Possible follow-ups: light sampling for emitters inside instances; keeping glTF mesh reuse as instances (now
+flattened); glTF cameras, `KHR_lights_punctual`, `KHR_texture_transform`, hard alpha cutoff for `MASK`; more than two
+motion keys and deformation blur; exact (analytic) motion bounds; SIMD intrinsics / BVH8 and spatial splits (SBVH);
+per-instance material overrides; cones and curves.
 
 ## M6 — Advanced transport
 

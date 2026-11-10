@@ -1,0 +1,81 @@
+# Instancing: tens of thousands of trees and rocks from two small prototypes.
+# Each prototype is stored once with its own BVH; instances only add a transform and
+# an entry in the top-level BVH, so memory stays small however many there are.
+
+include = "lib/materials.toml"   # bark, leaves, grass, gray, ...
+
+[render]
+width = 1280
+height = 640
+spp = 256
+max_depth = 6
+noise_threshold = 0.03
+
+[camera]
+position = [0, 7, 34]
+look_at = [0, 2.5, 0]
+fov = 38
+
+[background]
+type = "sky"
+sun_elevation = 18
+sun_azimuth = 230
+turbidity = 4
+ground = [0.1, 0.12, 0.06]
+
+# --- Prototypes ---------------------------------------------------------------------
+
+[prototypes.tree]               # an OBJ whose 'usemtl bark' / 'usemtl leaves' groups pick
+file = "models/tree.obj"        # up the library materials of the same names
+smooth = false
+
+[[prototypes.rock.objects]]     # prototypes may combine several objects
+type = "box"
+size = [1, 0.6, 0.8]
+rotate = [8, 20, 5]
+material = "gray"
+
+[[prototypes.rock.objects]]
+type = "box"
+size = [0.6, 0.5, 0.6]
+rotate = [-10, 50, 12]
+translate = [0.45, 0.1, 0.2]
+material = "gray"
+
+# --- World --------------------------------------------------------------------------
+
+[[objects]]   # ground
+type = "disk"
+radius = 500
+material = "grass"
+
+[[objects]]   # a forest: random positions, headings and sizes
+type = "instance"
+prototype = "tree"
+scale = 1.6
+scatter = { count = 50000, min = [-250, 0, -250], max = [250, 0, 6], rotate = [0, 360, 0], scale = [0.6, 1.8], seed = 1 }
+
+[[objects]]
+type = "instance"
+prototype = "rock"
+scatter = { count = 6000, min = [-100, -0.1, -100], max = [100, -0.1, 28], rotate = [10, 360, 10], scale = [0.15, 0.7], seed = 2 }
+
+[[objects]]   # a few hand-placed trees in the clearing
+type = "instance"
+prototype = "tree"
+translate = [-4, 0, 16]
+scale = 2.2
+
+[[objects]]
+type = "instance"
+prototype = "tree"
+translate = [7, 0, 10]
+rotate = [0, 40, 0]
+scale = 3.0
+
+[[objects]]   # instances of the same prototype can also move (motion blur)
+type = "instance"
+prototype = "rock"
+translate = [-3, 3.2, 20]
+scale = 0.6
+motion = { translate = [-1.2, 1.8, 20], rotate = [0, 0, -150] }

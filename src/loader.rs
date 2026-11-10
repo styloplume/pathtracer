@@ -1,41 +1,47 @@
 //! Builds a `Scene` from a TOML scene description. See `scenes/*.toml` for examples.
 
-use crate::camera::CameraDesc;
+mod include;
+mod objects;
+
+use crate::camera::{CameraDesc, Pose, Projection};
 use crate::environment::{EnvSource, Environment};
 use crate::filter::FilterKind;
-use crate::geometry::{NO_NORMALS, NO_UVS, Sphere, Triangle};
+use crate::geometry::Triangle;
 use crate::image::Tonemap;
 use crate::imageio;
 use crate::lights::{Light, LightSamplerKind};
 use crate::material::{METAL_PRESETS, Material, MaterialKind, MetalFresnel, Principled, metal_preset};
-use crate::math::{PI, Transform, Vec3};
-use crate::mesh;
+use crate::math::{PI, Vec3};
 use crate::mtl::{self, MtlMap, MtlMaterial};
 use crate::output::{Aov, Format, OutputSettings};
-use crate::scene::{Geometry, RenderSettings, Scene};
+use crate::scene::{Geometry, InstanceDesc, RenderSettings, Scene};
+use crate::shapes::Shape;
 use crate::sky::{SUN_RADIUS, Sky};
 use crate::spectrum::blackbody_rgb;
 use crate::texture::{Channel, ImageTex, TexImage, Texture, Wrap};
-use crate::toml::{self, Table, Value};
+use crate::toml::{Table, Value};
+use include::dir_of;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
 pub fn load_scene(path: &Path) -> Result<Scene, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
-    let doc = toml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut files = vec![path.to_path_buf()];
+    let doc = include::load_doc(path, &mut files, &mut Vec::new())?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
 
     let empty = Table::new();
     let section = |name: &str| section(&doc, &empty, name);
 
-    let settings = parse_render(section("render")?)?;
-    let camera = parse_camera(section("camera")?)?;
+    let mut settings = parse_render(section("render")?)?;
+    let (camera, exposure) = parse_camera(section("camera")?)?;
+    settings.exposure += exposure;
     let output = parse_output(section("output")?)?;
 
-    let mut b = Builder::default();
-    let mut lights = b.parse_background(section("background")?, base_dir)?;
+    let mut b = Builder { n_groups: 1, files, ..Builder::default() };
+    let background = section("background")?;
+    let mut lights = b.parse_background(background, &dir_of(background, base_dir))?;
     if let Some(ls) = doc.get("lights") {
         let ls = ls.as_array().ok_or("'lights' must be an array of tables ([[lights]])")?;
         for (i, l) in ls.iter().enumerate() {
@@ -47,10 +53,11 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
     for (name, v) in section("materials")? {
         let ctx = format!("[materials.{name}]");
         let t = v.as_table().ok_or_else(|| format!("{ctx} must be a table"))?;
-        let m = b.parse_material(t, &ctx, base_dir)?;
+        let m = b.parse_material(t, &ctx, &dir_of(t, base_dir))?;
         b.names.insert(name.clone(), b.materials.len() as u32);
         b.materials.push(m);
     }
+    b.parse_prototypes(section("prototypes")?, base_dir)?;
 
     if let Some(objs) = doc.get("objects") {
         let objs = objs.as_array().ok_or("'objects' must be an array of tables ([[objects]])")?;
@@ -64,15 +71,21 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
     if !settings.spectral && b.materials.iter().any(Material::is_dispersive) {
         eprintln!("warning: dispersion ('abbe') needs spectral rendering ([render] spectral = true or --spectral)");
     }
-    if b.triangles.is_empty() && b.spheres.is_empty() {
+    if b.triangles.is_empty() && b.shapes.is_empty() {
         eprintln!("warning: scene contains no objects");
     }
-    let mut files = vec![path.to_path_buf()];
-    files.append(&mut b.files);
-    let geo =
-        Geometry { positions: b.positions, normals: b.normals, uvs: b.uvs, triangles: b.triangles, spheres: b.spheres };
+    let geo = Geometry {
+        positions: b.positions,
+        normals: b.normals,
+        uvs: b.uvs,
+        triangles: b.triangles,
+        shapes: b.shapes,
+        tri_group: b.tri_group,
+        shape_group: b.shape_group,
+        instances: b.instances,
+    };
     let mut scene = Scene::new(settings, camera, lights, b.materials, geo);
-    scene.files = files;
+    scene.files = b.files;
     scene.output = output;
     Ok(scene)
 }
@@ -239,17 +252,107 @@ fn parse_output(t: &Table) -> Result<OutputSettings, String> {
     })
 }
 
-fn parse_camera(t: &Table) -> Result<CameraDesc, String> {
+/// `[camera]`, and the exposure (stops) of a physical camera's ISO / shutter speed / f-stop.
+///
+/// Physical parameters: `focal_length` (mm, on a `sensor_height` mm tall sensor, default
+/// 24) sets the field of view; `f_stop` sets the lens aperture (scene units are meters);
+/// `iso` and `shutter_speed` (seconds) with `f_stop` set the exposure like a camera's
+/// saturation-based metering: scene values are scaled by t S / (120 N^2).
+fn parse_camera(t: &Table) -> Result<(CameraDesc, f32), String> {
     let ctx = "[camera]";
     let d = CameraDesc::default();
-    Ok(CameraDesc {
+    let projection = match str_opt(t, "projection", ctx)?.or(str_opt(t, "type", ctx)?) {
+        None => d.projection,
+        Some(s) => Projection::parse(s)
+            .ok_or_else(|| format!("{ctx}: unknown projection '{s}' (perspective, orthographic, fisheye, equirect)"))?,
+    };
+    let sensor = f32_or(t, "sensor_height", 24.0, ctx)?;
+    let focal = num(t, "focal_length", ctx)?.map(|v| v as f32);
+    // A focal length overrides `fov` (which an included file may have set).
+    let fov = match (focal, num(t, "fov", ctx)?) {
+        (Some(f), _) if f > 0.0 && sensor > 0.0 => 2.0 * (sensor / (2.0 * f)).atan().to_degrees(),
+        (Some(_), _) => return Err(format!("{ctx}: 'focal_length' and 'sensor_height' must be positive")),
+        (None, Some(v)) => v as f32,
+        (None, None) if projection == Projection::Fisheye => 180.0,
+        (None, None) => d.fov,
+    };
+    let max_fov = if projection == Projection::Fisheye { 360.0 } else { 179.0 };
+    if !(fov > 0.0 && fov <= max_fov) {
+        return Err(format!("{ctx}: 'fov' must be in (0, {max_fov}] degrees"));
+    }
+    let f_stop = num(t, "f_stop", ctx)?.map(|v| v as f32);
+    if f_stop.is_some_and(|n| n <= 0.0) {
+        return Err(format!("{ctx}: 'f_stop' must be positive"));
+    }
+    let aperture = match (num(t, "aperture", ctx)?, f_stop) {
+        (Some(a), _) => a as f32,
+        // Lens diameter = focal length / f-number, in meters.
+        (None, Some(n)) => {
+            let focal_mm = focal.unwrap_or_else(|| sensor / (2.0 * (fov.to_radians() * 0.5).tan()));
+            focal_mm / 1000.0 / n
+        }
+        (None, None) => d.aperture,
+    };
+    let (iso, shutter_speed) = (num(t, "iso", ctx)?, num(t, "shutter_speed", ctx)?);
+    let exposure = if iso.is_some() || shutter_speed.is_some() {
+        let n = f_stop.ok_or_else(|| format!("{ctx}: physical exposure ('iso', 'shutter_speed') needs 'f_stop'"))?;
+        let (s, time) = (iso.unwrap_or(100.0) as f32, shutter_speed.unwrap_or(0.01) as f32);
+        if s <= 0.0 || time <= 0.0 {
+            return Err(format!("{ctx}: 'iso' and 'shutter_speed' must be positive"));
+        }
+        (time * s / (120.0 * n * n)).log2()
+    } else {
+        0.0
+    };
+    let pose = Pose {
         position: vec3_or(t, "position", d.position, ctx)?,
         look_at: vec3_or(t, "look_at", d.look_at, ctx)?,
         up: vec3_or(t, "up", d.up, ctx)?,
-        fov: f32_or(t, "fov", d.fov, ctx)?,
-        aperture: f32_or(t, "aperture", d.aperture, ctx)?,
+    };
+    let motion = match t.get("motion") {
+        None => None,
+        Some(v) => {
+            let m =
+                v.as_table().ok_or_else(|| format!("{ctx}: 'motion' must be a table {{ position, look_at, up }}"))?;
+            let mctx = &format!("{ctx} motion");
+            let end = Pose {
+                position: vec3_or(m, "position", pose.position, mctx)?,
+                look_at: vec3_or(m, "look_at", pose.look_at, mctx)?,
+                up: vec3_or(m, "up", pose.up, mctx)?,
+            };
+            (end != pose).then_some(end)
+        }
+    };
+    let shutter = match t.get("shutter") {
+        None => d.shutter,
+        Some(v) if v.as_f64().is_some() => [0.0, v.as_f64().unwrap_or(1.0) as f32],
+        Some(v) => match v.as_array() {
+            Some([a, b]) if a.as_f64().is_some() && b.as_f64().is_some() => {
+                [a.as_f64().unwrap_or(0.0) as f32, b.as_f64().unwrap_or(1.0) as f32]
+            }
+            _ => return Err(format!("{ctx}: 'shutter' must be [open, close] or the close time")),
+        },
+    };
+    if !(shutter[0] <= shutter[1] && shutter[0].is_finite() && shutter[1].is_finite()) {
+        return Err(format!("{ctx}: 'shutter' must open before it closes"));
+    }
+    let ortho_height = num(t, "ortho_height", ctx)?.map(|v| v as f32);
+    if ortho_height.is_some_and(|h| h <= 0.0) {
+        return Err(format!("{ctx}: 'ortho_height' must be positive"));
+    }
+    let cam = CameraDesc {
+        position: pose.position,
+        look_at: pose.look_at,
+        up: pose.up,
+        fov,
+        aperture,
         focus_distance: num(t, "focus_distance", ctx)?.map(|v| v as f32),
-    })
+        projection,
+        ortho_height,
+        motion,
+        shutter,
+    };
+    Ok((cam, exposure))
 }
 
 /// `color` (default white) times the black-body colour of `temperature` (Kelvin), if given.
@@ -372,7 +475,16 @@ struct Builder {
     normals: Vec<Vec3>,
     uvs: Vec<[f32; 2]>,
     triangles: Vec<Triangle>,
-    spheres: Vec<Sphere>,
+    shapes: Vec<Shape>,
+    /// Geometry group of each triangle / shape (0 = static world geometry).
+    tri_group: Vec<u32>,
+    shape_group: Vec<u32>,
+    /// The group new geometry goes into, and the number of groups so far.
+    group: u32,
+    n_groups: u32,
+    instances: Vec<InstanceDesc>,
+    /// Geometry group of each prototype.
+    prototypes: HashMap<String, u32>,
     files: Vec<PathBuf>,
     /// Decoded images by (path, sRGB).
     images: HashMap<(PathBuf, bool), Arc<TexImage>>,
@@ -380,6 +492,8 @@ struct Builder {
     mtl_libs: HashMap<PathBuf, Rc<Vec<MtlMaterial>>>,
     /// Scene material ids of MTL materials already converted, by (library, name).
     mtl_ids: HashMap<(PathBuf, String), u32>,
+    /// Scene material ids of glTF materials already converted, by (file, index).
+    gltf_ids: HashMap<(PathBuf, usize), u32>,
 }
 
 impl Builder {
@@ -461,6 +575,17 @@ impl Builder {
         }
         self.track(path);
         let img = Arc::new(TexImage::new(imageio::load(path)?, srgb));
+        self.images.insert(key, img.clone());
+        Ok(img)
+    }
+
+    /// An image embedded in another file, cached under the made-up path `key`.
+    fn image_bytes(&mut self, key: &Path, bytes: &[u8], srgb: bool) -> Result<Arc<TexImage>, String> {
+        let key = (key.to_path_buf(), srgb);
+        if let Some(img) = self.images.get(&key) {
+            return Ok(img.clone());
+        }
+        let img = Arc::new(TexImage::new(imageio::decode(bytes, "")?, srgb));
         self.images.insert(key, img.clone());
         Ok(img)
     }
@@ -847,123 +972,6 @@ impl Builder {
         }
         Ok(mat)
     }
-
-    // -------------------------------------------------------------- geometry
-
-    fn add_object(&mut self, t: &Table, ctx: &str, base_dir: &Path) -> Result<(), String> {
-        let ty = str_opt(t, "type", ctx)?.ok_or_else(|| format!("{ctx}: missing 'type'"))?;
-        let mat = self.material(t, ctx, base_dir)?;
-        match ty {
-            "sphere" => {
-                let radius = f32_or(t, "radius", 1.0, ctx)?;
-                if radius <= 0.0 {
-                    return Err(format!("{ctx}: 'radius' must be positive"));
-                }
-                let material = mat.unwrap_or_else(|| self.default_material());
-                self.spheres.push(Sphere { center: vec3_or(t, "center", Vec3::ZERO, ctx)?, radius, material });
-            }
-            "quad" => {
-                // Parallelogram origin, origin+u, origin+u+v, origin+v. Normal = u x v.
-                // Texture coordinates run (0,0) at the origin to (1,1) at origin+u+v.
-                let o = vec3_req(t, "origin", ctx)?;
-                let u = vec3_req(t, "u", ctx)?;
-                let v = vec3_req(t, "v", ctx)?;
-                let material = mat.unwrap_or_else(|| self.default_material());
-                let base = self.positions.len() as u32;
-                let tb = self.uvs.len() as u32;
-                self.positions.extend([o, o + u, o + u + v, o + v]);
-                self.uvs.extend([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
-                self.push_tri([base, base + 1, base + 2], None, Some([tb, tb + 1, tb + 2]), material);
-                self.push_tri([base, base + 2, base + 3], None, Some([tb, tb + 2, tb + 3]), material);
-            }
-            "triangle" => {
-                let ps = [vec3_req(t, "p0", ctx)?, vec3_req(t, "p1", ctx)?, vec3_req(t, "p2", ctx)?];
-                let material = mat.unwrap_or_else(|| self.default_material());
-                let base = self.positions.len() as u32;
-                self.positions.extend(ps);
-                self.push_tri([base, base + 1, base + 2], None, None, material);
-            }
-            "mesh" => {
-                let file = str_opt(t, "file", ctx)?.ok_or_else(|| format!("{ctx}: missing 'file'"))?;
-                let file = base_dir.join(file);
-                self.track(&file);
-                let data = mesh::load(&file)?;
-                let xf = parse_transform(t, ctx)?;
-                let mesh_dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
-                self.add_mesh(&data, &xf, mat, &mesh_dir, t, ctx)?;
-            }
-            other => {
-                return Err(format!("{ctx}: unknown object type '{other}' (sphere, quad, triangle, mesh)"));
-            }
-        }
-        Ok(())
-    }
-
-    fn add_mesh(
-        &mut self,
-        m: &mesh::MeshData,
-        xf: &Transform,
-        mat: Option<u32>,
-        mesh_dir: &Path,
-        t: &Table,
-        ctx: &str,
-    ) -> Result<(), String> {
-        let smooth = bool_or(t, "smooth", true, ctx)?;
-        // Map each material group in the file to a scene material: the object's
-        // `material` wins, then a scene material of the same name, then the mesh's
-        // material library, then the default.
-        let mut group_mat = Vec::with_capacity(m.groups.len());
-        for g in &m.groups {
-            let id = match (mat, self.names.get(g)) {
-                (Some(id), _) | (None, Some(&id)) => id,
-                (None, None) => {
-                    if let Some(id) = self.mtl_material_id(mesh_dir, &m.mtllibs, g)? {
-                        id
-                    } else {
-                        if !g.is_empty() {
-                            eprintln!("warning: {ctx}: material '{g}' not defined, using default");
-                        }
-                        self.default_material()
-                    }
-                }
-            };
-            group_mat.push(id);
-        }
-        let vbase = self.positions.len() as u32;
-        let nbase = self.normals.len() as u32;
-        let tbase = self.uvs.len() as u32;
-        self.positions.extend(m.positions.iter().map(|&p| xf.point(p)));
-        if smooth {
-            self.normals.extend(m.normals.iter().map(|&n| xf.normal(n)));
-        }
-        self.uvs.extend_from_slice(&m.uvs);
-        let flip = xf.flips_handedness();
-        for tri in &m.triangles {
-            let mut v = tri.v.map(|i| i + vbase);
-            let mut n = tri.n.filter(|_| smooth).map(|n| n.map(|i| i + nbase));
-            let mut uv = tri.uv.map(|t| t.map(|i| i + tbase));
-            if flip {
-                v.swap(1, 2);
-                if let Some(n) = n.as_mut() {
-                    n.swap(1, 2);
-                }
-                if let Some(uv) = uv.as_mut() {
-                    uv.swap(1, 2);
-                }
-            }
-            self.push_tri(v, n, uv, group_mat[tri.group as usize]);
-        }
-        Ok(())
-    }
-
-    fn push_tri(&mut self, v: [u32; 3], n: Option<[u32; 3]>, uv: Option<[u32; 3]>, material: u32) {
-        let (p0, p1, p2) =
-            (self.positions[v[0] as usize], self.positions[v[1] as usize], self.positions[v[2] as usize]);
-        if (p1 - p0).cross(p2 - p0).length_squared() == 0.0 {
-            return; // degenerate
-        }
-        self.triangles.push(Triangle { v, n: n.unwrap_or([NO_NORMALS; 3]), uv: uv.unwrap_or([NO_UVS; 3]), material });
-    }
 }
 
 /// `[u, v]` or a single number for both.
@@ -995,9 +1003,51 @@ fn space(t: &Table, default_world: bool, ctx: &str) -> Result<bool, String> {
     }
 }
 
-fn parse_transform(t: &Table, ctx: &str) -> Result<Transform, String> {
-    let translate = vec3_or(t, "translate", Vec3::ZERO, ctx)?;
-    let rotate = vec3_or(t, "rotate", Vec3::ZERO, ctx)?;
-    let scale = vec3_or(t, "scale", Vec3::ONE, ctx)?;
-    Transform::new(translate, rotate, scale).map_err(|e| format!("{ctx}: {e}"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every example scene loads, and the demo scenes build what they promise.
+    #[test]
+    fn example_scenes_load() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenes");
+        let mut n = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                let scene = load_scene(&path).unwrap_or_else(|e| panic!("{e}"));
+                assert!(scene.num_prims() > 0, "{}", path.display());
+                n += 1;
+            }
+        }
+        assert!(n >= 9, "found {n} scenes");
+
+        let shapes = load_scene(&dir.join("shapes.toml")).unwrap();
+        assert!(shapes.files.iter().any(|f| f.ends_with("lib/materials.toml")), "includes are watched");
+        assert!(
+            shapes.files.iter().any(|f| f.ends_with("knot.gltf"))
+                && shapes.files.iter().any(|f| f.ends_with("pawn.stl"))
+        );
+        assert!(shapes.camera.motion.is_none() && shapes.camera.shutter[1] > shapes.camera.shutter[0]);
+        // The glTF material became a textured principled material.
+        assert!(
+            shapes
+                .materials
+                .iter()
+                .any(|m| matches!(&m.kind, MaterialKind::Principled(p) if matches!(p.base_color, Texture::Image(_))))
+        );
+        let forest = load_scene(&dir.join("instancing.toml")).unwrap();
+        assert!(forest.stats().contains("56003 instances"), "{}", forest.stats());
+    }
+
+    #[test]
+    fn physical_camera() {
+        let doc = crate::toml::parse("focal_length = 50\nf_stop = 2\niso = 400\nshutter_speed = 0.01\n").unwrap();
+        let (cam, ev) = parse_camera(&doc).unwrap();
+        assert!((cam.fov - 2.0 * (12.0f32 / 50.0).atan().to_degrees()).abs() < 1e-4);
+        assert!((cam.aperture - 0.025).abs() < 1e-6, "50 mm at f/2 is a 25 mm lens opening");
+        assert!((ev - (0.01f32 * 400.0 / (120.0 * 4.0)).log2()).abs() < 1e-5);
+        let doc = crate::toml::parse("iso = 400\n").unwrap();
+        assert!(parse_camera(&doc).is_err(), "physical exposure needs an f-stop");
+    }
 }

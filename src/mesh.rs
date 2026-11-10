@@ -28,9 +28,61 @@ pub fn load(path: &std::path::Path) -> Result<MeshData, String> {
     let res = match ext.as_str() {
         "obj" => load_obj(&String::from_utf8_lossy(&bytes)),
         "ply" => load_ply(&bytes),
-        _ => Err(format!("unsupported mesh format '.{ext}' (supported: .obj, .ply)")),
+        "stl" => load_stl(&bytes),
+        _ => Err(format!("unsupported mesh format '.{ext}' (supported: .obj, .ply, .stl, .gltf, .glb)")),
     };
     res.map_err(|e| format!("{}: {e}", path.display()))
+}
+
+// ---------------------------------------------------------------------------- STL
+
+/// STL, binary or ASCII. Facets are flat shaded; identical corners are welded.
+pub fn load_stl(data: &[u8]) -> Result<MeshData, String> {
+    let mut corners: Vec<Vec3> = Vec::new();
+    let binary_len = data.get(80..84).map(|b| 84 + 50 * u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    if binary_len == Some(data.len()) {
+        for facet in data[84..].as_chunks::<50>().0 {
+            let f = |i: usize| f32::from_le_bytes(facet[i..i + 4].try_into().unwrap());
+            for c in 0..3 {
+                let o = 12 + 12 * c;
+                corners.push(Vec3::new(f(o), f(o + 4), f(o + 8)));
+            }
+        }
+    } else {
+        let text = std::str::from_utf8(data).map_err(|_| "neither a binary STL (size mismatch) nor ASCII text")?;
+        if !text.trim_start().starts_with("solid") {
+            return Err("not an STL file".into());
+        }
+        let mut facet = Vec::new();
+        for (lineno, line) in text.lines().enumerate() {
+            let mut it = line.split_whitespace();
+            match it.next() {
+                Some("vertex") => {
+                    facet.push(parse_vec3(&mut it).ok_or_else(|| format!("line {}: malformed vertex", lineno + 1))?);
+                }
+                Some("endloop") => {
+                    // Polygons are fanned (STL allows only triangles, some writers don't care).
+                    for i in 1..facet.len().saturating_sub(1) {
+                        corners.extend([facet[0], facet[i], facet[i + 1]]);
+                    }
+                    facet.clear();
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut m = MeshData { groups: vec![String::new()], ..Default::default() };
+    let mut index: std::collections::HashMap<[u32; 3], u32> = std::collections::HashMap::new();
+    let mut vertex = |p: Vec3| {
+        *index.entry([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).or_insert_with(|| {
+            m.positions.push(p);
+            (m.positions.len() - 1) as u32
+        })
+    };
+    let tris: Vec<[u32; 3]> =
+        corners.as_chunks::<3>().0.iter().map(|c| [vertex(c[0]), vertex(c[1]), vertex(c[2])]).collect();
+    m.triangles = tris.into_iter().map(|v| MeshTriangle { v, n: None, uv: None, group: 0 }).collect();
+    Ok(m)
 }
 
 pub fn load_obj(text: &str) -> Result<MeshData, String> {
@@ -374,5 +426,29 @@ mod tests {
         let m = load_ply(&bin).unwrap();
         assert_eq!(m.positions[1], Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(m.triangles[0].v, [0, 1, 2]);
+    }
+
+    #[test]
+    fn stl_ascii_and_binary_weld_vertices() {
+        let ascii = "solid quad\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 1 1 0\nendloop\nendfacet\n\
+                     facet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 1 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid quad\n";
+        let m = load_stl(ascii.as_bytes()).unwrap();
+        assert_eq!((m.positions.len(), m.triangles.len()), (4, 2));
+        assert_eq!(m.triangles[1].v, [0, 2, 3]);
+
+        // The same quad in binary; the header may even start with "solid".
+        let mut bin = b"solid but binary".to_vec();
+        bin.resize(80, 0);
+        bin.extend_from_slice(&2u32.to_le_bytes());
+        for tri in [[0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]] {
+            bin.extend_from_slice(&[0u8; 12]);
+            for v in tri {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+            bin.extend_from_slice(&[0, 0]);
+        }
+        let b = load_stl(&bin).unwrap();
+        assert_eq!(b.positions, m.positions);
+        assert_eq!(b.triangles.iter().map(|t| t.v).collect::<Vec<_>>(), [[0, 1, 2], [0, 2, 3]]);
     }
 }

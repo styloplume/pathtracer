@@ -346,7 +346,8 @@ fn trace_pixel(ctx: &Ctx<'_>, x: usize, y: usize, sample: u32) -> PathSample {
     // Filter importance sampling: the offset from the pixel center follows the filter.
     let s = (x as f32 + 0.5 + ctx.filter.sample(rng.f32())) / ctx.w as f32;
     let t = (y as f32 + 0.5 + ctx.filter.sample(rng.f32())) / ctx.h as f32;
-    let ray = ctx.camera.ray(s, t, &mut rng);
+    // Outside a fisheye's image circle: black.
+    let Some(ray) = ctx.camera.ray(s, t, &mut rng) else { return PathSample::default() };
     let mut ps = radiance(scene, ray, &mut rng);
     if !ps.radiance.is_finite() {
         ps.radiance = Vec3::ZERO;

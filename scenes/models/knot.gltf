@@ -1,0 +1,148 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "PathTracer M5 demo"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "knot",
+   "mesh": 0,
+   "rotation": [
+    0.258819,
+    0,
+    0,
+    0.9659258
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0
+    }
+   ]
+  }
+ ],
+ "materials": [
+  {
+   "name": "knot_paint",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 0.0,
+    "roughnessFactor": 0.35
+   },
+   "extensions": {
+    "KHR_materials_ior": {
+     "ior": 1.5
+    }
+   }
+  }
+ ],
+ "extensionsUsed": [
+  "KHR_materials_ior"
+ ],
+ "textures": [
+  {
+   "source": 0,
+   "sampler": 0
+  }
+ ],
+ "samplers": [
+  {
+   "wrapS": 10497,
+   "wrapT": 10497
+  }
+ ],
+ "images": [
+  {
+   "bufferView": 4,
+   "mimeType": "image/png"
+  }
+ ],
+ "buffers": [
+  {
+   "uri": "knot.bin",
+   "byteLength": 108088
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 30108
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 30108,
+   "byteLength": 30108
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 60216,
+   "byteLength": 20072
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 80288,
+   "byteLength": 27648
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 107936,
+   "byteLength": 149
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 2509,
+   "type": "VEC3",
+   "min": [
+    -1.2230169091508099,
+    -0.6067394385982671,
+    -1.4294037168421216
+   ],
+   "max": [
+    1.51,
+    0.6070744330947194,
+    1.4266718702552936
+   ]
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5126,
+   "count": 2509,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "componentType": 5126,
+   "count": 2509,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "componentType": 5123,
+   "count": 13824,
+   "type": "SCALAR"
+  }
+ ]
+}

@@ -57,8 +57,12 @@ exposure and tonemap changes are kept unless that part of the file changed.
   - Every material takes `normal_map` (tangent space), `bump` (height texture) and `alpha` (cut-out / stochastic coverage).
 - **Textures:** any color or scalar parameter can be a constant, an image (bilinear / nearest, repeat / clamp / mirror, UV scale / offset, sRGB or linear, channel select), a checker or Perlin noise / turbulence (UV or world space). Texture coordinates come from OBJ `vt`, PLY `u v` / `s t`, quads (0..1) and spheres (latitude-longitude).
 - **Image loaders** (own code): PNG (all color types and bit depths, palette, tRNS, Adam7), baseline JPEG (any chroma subsampling, restart markers), TGA (raw / RLE), PPM / PGM, PFM, Radiance HDR.
-- **Geometry:** spheres, quads, triangles, meshes; binned-SAH BVH with alpha testing.
-- **Formats:** scenes in TOML (own parser); meshes in OBJ (polygons, normals, UVs, negative indices, `usemtl`, `mtllib`) and PLY (ASCII / binary LE / BE). OBJ `.mtl` libraries are imported (`Kd Ks Ke Ns Ni d Tr illum Pr Pm`, `map_Kd map_Ks map_Ke map_d map_Bump norm map_Pr map_Pm` with `-s -o -bm -clamp`); a scene material with the same name overrides an MTL material.
+- **Geometry:** analytic spheres, disks / annuli, cylinders (open or capped) and oriented boxes, all usable as area lights; quads, triangles and meshes with watertight ray/triangle intersection (Woop et al.). Every object takes `translate` / `rotate` / `scale`.
+- **Acceleration:** two-level BVH. Each geometry group has a 4-wide BVH (binned SAH, built in parallel, children's bounds stored as structure-of-arrays so one node visit tests four boxes); a top-level BVH holds the instances.
+- **Instancing:** `[prototypes.NAME]` defines geometry once; `type = "instance"` objects place it, one at a time or thousands at once with `scatter` (random offsets / rotations / scales). Emitters inside instances are not light-sampled (they only add light when hit).
+- **Motion blur:** objects and instances take `motion = { translate, rotate, scale }` (the transform at the end of the frame; rotations interpolate per axis, so large angles spin), the camera `motion = { position, look_at, up }`; `[camera] shutter = [open, close]`.
+- **Cameras:** `projection = "perspective"` (thin lens), `"orthographic"`, `"fisheye"` (equidistant, circular) or `"equirect"` (360° panorama). Physical parameters: `focal_length` (mm, `sensor_height` 24 mm) instead of `fov`, `f_stop` for the lens aperture (scene units are meters), and `iso` / `shutter_speed` for exposure (scene values scaled by t·S / (120·N²), the saturation-based metering of real cameras, which only gives sensible brightness for scenes in physical units).
+- **Formats:** scenes in TOML (own parser) with `include = [...]` for shared settings and material libraries; meshes in OBJ (polygons, normals, UVs, negative indices, `usemtl`, `mtllib`), PLY (ASCII / binary LE / BE), STL (ASCII / binary) and glTF 2.0 (`.gltf` with external or embedded buffers, `.glb`; own JSON parser; node hierarchy, triangle lists / strips / fans, metallic-roughness materials with base color / metal-rough / normal / emissive textures, alpha modes, `KHR_materials_emissive_strength`, `_transmission`, `_ior`). OBJ `.mtl` libraries are imported (`Kd Ks Ke Ns Ni d Tr illum Pr Pm`, `map_Kd map_Ks map_Ke map_d map_Bump norm map_Pr map_Pm` with `-s -o -bm -clamp`); a scene material with the same name overrides an MTL or glTF material.
 - **Sampling:** reconstruction filters (box, tent, Gaussian, Blackman-Harris) via filter importance sampling; per-pixel variance estimate; adaptive sampling (converged pixels stop, the rest keep going) with noise-threshold, time-limit and spp stop criteria.
 - **Denoiser:** edge-aware à-trous wavelet filter (SVGF-style, spatial), guided by albedo / normal / depth AOVs and the per-pixel variance; albedo is demodulated so material detail stays sharp.
 - **Output:** ACES / Reinhard / clamp tonemapping, exposure, sRGB; PNG (own DEFLATE: LZ77 + fixed/dynamic Huffman, row filters), Radiance `.hdr` (RLE RGBE) and `.pfm`; denoised copy and albedo / normal / depth AOV images; optional save on completion.
@@ -83,11 +87,16 @@ exposure and tonemap changes are kept unless that part of the file changed.
 | `src/deflate.rs` | DEFLATE / zlib compressor and decompressor |
 | `src/material.rs` | materials, BSDF lobes, Fresnel, energy compensation tables |
 | `src/texture.rs` | image / procedural textures, Perlin noise |
-| `src/scene.rs` | scene data, BVH traversal, alpha testing, UVs / tangents |
-| `src/bvh.rs` | SAH BVH builder |
-| `src/loader.rs` | TOML → scene, texture cache, MTL → material mapping |
+| `src/scene.rs` | scene data, geometry groups and instances, two-level traversal, alpha testing, UVs / tangents |
+| `src/bvh.rs` | parallel binned-SAH build, 4-wide BVH and its traversal |
+| `src/geometry.rs`, `src/shapes.rs` | bounds, watertight triangles; spheres, disks, cylinders, boxes |
+| `src/camera.rs` | perspective / orthographic / fisheye / equirect cameras, shutter and camera motion |
+| `src/loader.rs` | TOML → scene: sections, materials, textures, MTL → material mapping |
+| `src/loader/objects.rs` | objects, transforms, motion, prototypes / instances, mesh and glTF import |
+| `src/loader/include.rs` | scene includes |
 | `src/imageio.rs`, `src/jpeg.rs` | image decoders |
-| `src/toml.rs`, `src/mesh.rs`, `src/mtl.rs`, `src/image.rs` | parsers / writers |
+| `src/gltf.rs`, `src/json.rs` | glTF 2.0 reader and its JSON parser |
+| `src/toml.rs`, `src/mesh.rs`, `src/mtl.rs`, `src/image.rs` | parsers / writers (mesh.rs: OBJ, PLY, STL) |
 | `src/platform/` | native window |
 
 ## Development
@@ -110,7 +119,9 @@ Enable the pre-commit hook (fmt, lint, rustdoc) once per clone: `git config core
 
 See `scenes/cornell.toml` for an annotated scene file, `scenes/materials.toml` for materials and textures,
 `scenes/lights.toml` for light types and many-light sampling, `scenes/sky.toml` for daylight, `scenes/envmap.toml`
-for image-based lighting and `scenes/dispersion.toml` for spectral rendering.
+for image-based lighting, `scenes/dispersion.toml` for spectral rendering, `scenes/shapes.toml` for analytic shapes,
+glTF / STL import, motion blur and camera models, and `scenes/instancing.toml` for prototypes, instances and
+`scatter` (56 000 instances). `scenes/lib/materials.toml` is a material library to `include`.
 
 Note: the glass `tint` parameter was replaced by Beer–Lambert absorption (`color` = transmittance after
 `distance` scene units); loading a scene that still uses `tint` reports this. `[background] type = "sky"` used to be

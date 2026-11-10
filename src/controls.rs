@@ -22,6 +22,9 @@ pub struct CameraController {
     aperture: f32,
     /// Fixed focus distance from the scene file; `None` keeps the target in focus.
     focus_distance: Option<f32>,
+    /// The scene file's camera: projection, shutter and motion carry over, the motion
+    /// only while the camera has not been moved.
+    base: CameraDesc,
 }
 
 impl CameraController {
@@ -50,6 +53,7 @@ impl CameraController {
             ref_x,
             aperture: desc.aperture,
             focus_distance: desc.focus_distance,
+            base: desc.clone(),
         }
     }
 
@@ -72,13 +76,19 @@ impl CameraController {
     }
 
     pub fn desc(&self) -> CameraDesc {
+        let (position, look_at) = (self.position(), self.target);
+        let b = &self.base;
+        let moved = (position - b.position).length() > 1e-4 * (1.0 + b.position.length())
+            || (look_at - b.look_at).length() > 1e-4 * (1.0 + b.look_at.length());
         CameraDesc {
-            position: self.position(),
-            look_at: self.target,
+            position,
+            look_at,
             up: self.up,
             fov: self.fov,
             aperture: self.aperture,
             focus_distance: self.focus_distance,
+            motion: if moved { None } else { b.motion },
+            ..b.clone()
         }
     }
 
