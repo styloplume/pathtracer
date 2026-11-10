@@ -76,7 +76,16 @@ const TRAVERSAL_COST: f32 = 1.0;
 const MAX_SAH_DEPTH: usize = 40;
 /// Subtrees with at least this many primitives are built on their own thread.
 const PARALLEL_MIN: usize = 16 * 1024;
-const STACK_SIZE: usize = 3 * (MAX_SAH_DEPTH + 32) + 4;
+/// Traversal stack entries needed for a 4-wide tree `depth` nodes deep: visiting a node
+/// pops it and pushes at most four children, so each level adds at most three entries.
+const fn stack_size(depth: usize) -> usize {
+    3 * depth + 1
+}
+/// Enough for any tree the builder makes: binary depth ≤ `MAX_SAH_DEPTH` + 32 median
+/// levels (2^32 primitives), and collapsing never makes the 4-wide tree deeper.
+const STACK_SIZE: usize = stack_size(MAX_SAH_DEPTH + 32) + 3;
+/// Trees up to this many 4-wide levels use a stack of `stack_size(SMALL_DEPTH)` entries.
+const SMALL_DEPTH: usize = 20;
 
 enum BuildNode {
     Leaf { bounds: Aabb, start: u32, count: u32 },
@@ -170,14 +179,31 @@ impl Bvh {
     /// intersects `indices[first..first + count]`, lowers `t_max` on hits and returns
     /// true to stop the traversal.
     #[inline]
-    pub fn traverse(&self, o: Vec3, d: Vec3, mut t_max: f32, mut leaf: impl FnMut(u32, u32, &mut f32) -> bool) {
+    pub fn traverse(&self, o: Vec3, d: Vec3, t_max: f32, leaf: impl FnMut(u32, u32, &mut f32) -> bool) {
+        // The stack is zero-initialized for every ray, so shallow trees (nearly all of them)
+        // use a small one: this alone made simple scenes trace ~10% faster.
+        if self.depth <= SMALL_DEPTH {
+            self.traverse_with::<{ stack_size(SMALL_DEPTH) }>(o, d, t_max, leaf);
+        } else {
+            self.traverse_with::<STACK_SIZE>(o, d, t_max, leaf);
+        }
+    }
+
+    #[inline]
+    fn traverse_with<const N: usize>(
+        &self,
+        o: Vec3,
+        d: Vec3,
+        mut t_max: f32,
+        mut leaf: impl FnMut(u32, u32, &mut f32) -> bool,
+    ) {
         if self.nodes.is_empty() {
             return;
         }
         let inv = d.recip();
         let (o, inv_d) = ([o.x, o.y, o.z], [inv.x, inv.y, inv.z]);
         // Entries: (node or leaf start, leaf count (0 = node), entry distance).
-        let mut stack = [(0u32, 0u32, 0.0f32); STACK_SIZE];
+        let mut stack = [(0u32, 0u32, 0.0f32); N];
         let mut sp = 1;
         while sp > 0 {
             sp -= 1;

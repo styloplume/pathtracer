@@ -71,7 +71,7 @@ fn annotate(doc: &mut Table, dir: &Path) {
     for (key, v) in doc.iter_mut() {
         match (key.as_str(), v) {
             ("background", Value::Table(t)) => mark(t),
-            ("materials" | "prototypes", Value::Table(entries)) => {
+            ("materials" | "media" | "prototypes", Value::Table(entries)) => {
                 for e in entries.values_mut() {
                     if let Value::Table(t) = e {
                         mark(t);
@@ -124,7 +124,7 @@ mod tests {
         std::fs::write(
             d.join("lib/materials.toml"),
             "[render]\nspp = 16\nwidth = 100\n[materials.wood]\ntype = \"diffuse\"\nalbedo = \"wood.png\"\n\
-             [materials.red]\nalbedo = [1, 0, 0]\n[[objects]]\ntype = \"sphere\"\n",
+             [materials.red]\nalbedo = [1, 0, 0]\n[media.smoke]\ngrid = \"smoke.vol\"\n[[objects]]\ntype = \"sphere\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -141,6 +141,8 @@ mod tests {
         let mats = doc["materials"].as_table().unwrap();
         let wood = mats["wood"].as_table().unwrap();
         assert_eq!(dir_of(wood, Path::new("x")), d.join("lib"));
+        let smoke = doc["media"].as_table().unwrap()["smoke"].as_table().unwrap();
+        assert_eq!(dir_of(smoke, Path::new("x")), d.join("lib"), "media grids resolve next to their file");
         // The scene's own definition replaces the library's, and keeps the scene directory.
         let red = mats["red"].as_table().unwrap();
         assert_eq!(red["albedo"].as_array().unwrap()[0].as_f64(), Some(0.5));

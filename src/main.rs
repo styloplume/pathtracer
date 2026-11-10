@@ -1,4 +1,7 @@
+#[cfg(test)]
+mod alloc_count;
 mod app;
+mod bench;
 mod bvh;
 mod camera;
 mod controls;
@@ -23,6 +26,8 @@ mod mesh;
 mod mtl;
 mod output;
 mod platform;
+#[cfg(test)]
+mod regression;
 mod renderer;
 mod rng;
 mod sampler;
@@ -44,6 +49,7 @@ use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
 usage: pathtracer <scene.toml> [options]
+       pathtracer bench [scene.toml ...] [options]   (see pathtracer bench --help)
 
 options:
   --headless          render without a window and save the result
@@ -161,6 +167,14 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("bench") {
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        if let Err(e) = bench::run(&rest) {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+        return;
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

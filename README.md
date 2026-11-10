@@ -5,7 +5,10 @@ A progressive, physically based path tracer in Rust with **zero external crates*
 ```
 cargo run --release -- scenes/cornell.toml               # interactive window
 cargo run --release -- scenes/spheres.toml --headless    # render to renders/spheres.png
+cargo run --release -- bench                             # rays/s and build times for every example scene
 ```
+
+The scene format is documented in [`docs/scene-format.md`](docs/scene-format.md).
 
 Options: `--headless`, `-o FILE` (`.png` / `.hdr` / `.pfm` picks the format), `--spp N`, `--size WxH`, `--threads N`,
 `--time SECONDS` (time limit), `--noise T` (adaptive sampling threshold, e.g. `0.02`), `--denoise` (also save a
@@ -71,13 +74,15 @@ exposure and tonemap changes are kept unless that part of the file changed.
 - **Sampling:** reconstruction filters (box, tent, Gaussian, Blackman-Harris) via filter importance sampling; per-pixel variance estimate; adaptive sampling (converged pixels stop, the rest keep going) with noise-threshold, time-limit and spp stop criteria.
 - **Denoiser:** edge-aware à-trous wavelet filter (SVGF-style, spatial), guided by albedo / normal / depth AOVs and the per-pixel variance; albedo is demodulated so material detail stays sharp.
 - **Output:** ACES / Reinhard / clamp tonemapping, exposure, sRGB; PNG (own DEFLATE: LZ77 + fixed/dynamic Huffman, row filters), Radiance `.hdr` (RLE RGBE) and `.pfm`; denoised copy and albedo / normal / depth AOV images; optional save on completion.
-- **Window:** raw Win32 FFI + GDI blitting (Windows only for now; `--headless` works everywhere).
+- **Window:** raw FFI on every platform: Win32 + GDI on Windows; X11 on Linux / BSD (Xlib loaded at run time with `dlopen`, so headless rendering needs no X libraries); Cocoa on macOS (Objective-C runtime calls, the image shown through a Core Animation layer).
+- **Benchmarks:** `pathtracer bench [scene.toml ...] [--size WxH] [--threads N] [--time S] [--csv FILE]` reports load and BVH build times and the throughput of primary, diffuse and shadow rays and of full paths for each scene (default: all of `scenes/`).
 
 ## Layout
 
 | File | Purpose |
 |---|---|
 | `src/main.rs` | CLI, headless rendering |
+| `src/bench.rs` | `pathtracer bench`: build times and ray throughput |
 | `src/app.rs` | windowed front end: UI thread, render thread, input, HUD, hot reload |
 | `src/controls.rs` | orbit / pan / look / fly camera controller |
 | `src/renderer.rs` | progressive coarse-to-fine scheduling, adaptive sampling, threading, progress callbacks, display views |
@@ -105,7 +110,10 @@ exposure and tonemap changes are kept unless that part of the file changed.
 | `src/imageio.rs`, `src/jpeg.rs` | image decoders |
 | `src/gltf.rs`, `src/json.rs` | glTF 2.0 reader and its JSON parser |
 | `src/toml.rs`, `src/mesh.rs`, `src/mtl.rs`, `src/image.rs` | parsers / writers (mesh.rs: OBJ, PLY, STL) |
-| `src/platform/` | native window |
+| `src/platform/` | native windows: `win32.rs`, `x11.rs`, `macos.rs` |
+| `src/regression.rs` | reference-image regression tests (`testdata/regression/`) |
+| `src/alloc_count.rs` | counting allocator for tests; checks the path-tracing hot path never allocates |
+| `docs/scene-format.md` | scene file reference |
 
 ## Development
 
@@ -116,14 +124,27 @@ The toolchain is pinned in `rust-toolchain.toml`; rustup installs it with `rustf
 | `cargo fmt --all` | formatting (`rustfmt.toml`: 120 columns) |
 | `cargo lint` | clippy over the binary and tests, warnings as errors |
 | `cargo lint-fix` | applies clippy's machine-applicable fixes |
-| `cargo test --release` | unit tests and render checksums |
+| `cargo test --release` | unit tests, the zero-allocation check and reference-image regression tests |
+| `PT_BLESS=1 cargo test --release regression` | re-creates the regression references after an intended change |
+| `cargo run --release -- bench` | performance: build times, rays/s, paths/s |
 
 Lint policy is in `Cargo.toml` under `[lints]`: `clippy::pedantic` plus a few restriction lints, with
 numeric-cast lints turned off as noise for renderer code. `unsafe` is denied everywhere except
-`src/platform/win32.rs`, and every `unsafe` block needs a `// SAFETY:` comment. Silence a lint at a site
+the platform backends in `src/platform/` and the test-only counting allocator, and every `unsafe` block needs a
+`// SAFETY:` comment. Silence a lint at a site
 with `#[expect(lint, reason = "...")]`; plain `#[allow]` and a missing reason are both flagged.
 
 Enable the pre-commit hook (fmt, lint, rustdoc) once per clone: `git config core.hooksPath .githooks`.
+
+CI (`.github/workflows/ci.yml`) runs formatting, clippy, rustdoc and all tests on Linux, Windows and macOS (plus a
+clippy pass for Intel macOS), and records a benchmark CSV on Linux. A failing regression test uploads its render,
+reference and difference images.
+
+Regression tests render each example scene at 128 pixels wide and compare 8×8 block averages of the tonemapped
+image with the stored reference. Each scene's tolerance is twice the difference between two renders with different
+seeds, measured when the reference is blessed and stored in `testdata/regression/<scene>.tol`. That ignores the noise
+pattern, which changes between platforms, but catches small biases: a 3% error in the diffuse lobe's direct
+lighting fails several scenes.
 
 See `scenes/cornell.toml` for an annotated scene file, `scenes/materials.toml` for materials and textures,
 `scenes/lights.toml` for light types and many-light sampling, `scenes/sky.toml` for daylight, `scenes/envmap.toml`

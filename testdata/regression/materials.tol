@@ -1,0 +1,4 @@
+# Limits for the block differences of the 'materials' regression test: 2x the difference
+# between two renders with different seeds (64 spp). Written by PT_BLESS=1.
+rms = 1.655
+max = 7.656

@@ -53,12 +53,24 @@ impl Stopwatch {
     }
 }
 
+/// One row of the accumulation buffer per lock.
+type Rows = Arc<[Mutex<Vec<Pixel>>]>;
+
+fn new_rows(w: usize, h: usize) -> Rows {
+    (0..h).map(|_| Mutex::new(vec![Pixel::default(); w])).collect()
+}
+
 /// The render thread's accumulation buffer as seen by the UI thread.
+///
+/// Workers copy each finished row in while holding the `Frame` lock (a short memcpy),
+/// and the UI copies changed rows out into its own buffer, locking only one row at a
+/// time, then resolves them without any lock held. (Resolving under the frame lock
+/// used to block the workers for ~17% of their time.)
 struct Frame {
     generation: u64,
     w: usize,
     h: usize,
-    accum: Vec<Pixel>,
+    rows: Rows,
     /// Block size of the pass in progress.
     block: usize,
     /// Last completed pass.
@@ -96,7 +108,9 @@ fn mark_dirty(d: &mut Option<Range<usize>>, r: Range<usize>) {
 struct Sink<'a> {
     shared: &'a Shared,
     generation: u64,
-    w: usize,
+    /// Set once the frame holds every row of this generation: until the first pass ends,
+    /// rows not yet traced keep showing the previous generation's image.
+    synced: AtomicBool,
 }
 
 impl Progress for Sink<'_> {
@@ -125,8 +139,7 @@ impl Progress for Sink<'_> {
         if f.generation != self.generation {
             return;
         }
-        let w = self.w;
-        f.accum[y * w..(y + 1) * w].copy_from_slice(row);
+        f.rows[y].lock().unwrap().copy_from_slice(row);
         mark_dirty(&mut f.dirty, y..y + 1);
         drop(f);
         self.shared.version.fetch_add(1, Ordering::Release);
@@ -137,10 +150,15 @@ impl Progress for Sink<'_> {
         if f.generation != self.generation {
             return;
         }
-        f.accum.copy_from_slice(pixels);
+        // Rows only change through `row_done`, so after the first pass this would be a no-op copy.
+        if !self.synced.swap(true, Ordering::Relaxed) {
+            for (dst, src) in f.rows.iter().zip(pixels.chunks_exact(f.w)) {
+                dst.lock().unwrap().copy_from_slice(src);
+            }
+            let h = f.h;
+            mark_dirty(&mut f.dirty, 0..h);
+        }
         f.info = Some(*info);
-        let h = f.h;
-        mark_dirty(&mut f.dirty, 0..h);
         if info.finished {
             self.shared.finished.store(true, Ordering::SeqCst);
             self.shared.clock.lock().unwrap().stop();
@@ -169,7 +187,7 @@ fn render_loop(shared: &Shared) {
                 // Same size: keep the old image visible under the new coarse preview.
                 f.w = w;
                 f.h = h;
-                f.accum = vec![Pixel::default(); w * h];
+                f.rows = new_rows(w, h);
                 f.dirty = Some(0..h);
             }
             f.block = (scene.settings.initial_block.max(1) as usize).next_power_of_two();
@@ -179,7 +197,13 @@ fn render_loop(shared: &Shared) {
         shared.finished.store(false, Ordering::SeqCst);
         shared.clock.lock().unwrap().reset(!shared.paused.load(Ordering::SeqCst));
         shared.version.fetch_add(1, Ordering::Release);
-        renderer::render_progressive(&scene, &camera, w, h, &Sink { shared, generation, w });
+        renderer::render_progressive(
+            &scene,
+            &camera,
+            w,
+            h,
+            &Sink { shared, generation, synced: AtomicBool::new(false) },
+        );
     }
 }
 
@@ -260,8 +284,12 @@ struct App<'a> {
     denoise_key: Option<(u64, u32)>,
     last_denoise: Instant,
 
+    /// The UI's copy of the accumulation buffer, updated from the frame's dirty rows.
+    accum: Vec<Pixel>,
     display: Vec<u32>,
     display_size: (usize, usize),
+    /// Samples per pixel the samples view was last resolved for.
+    shown_spp: u32,
     full_resolve: bool,
     needs_present: bool,
     last_version: u64,
@@ -304,7 +332,7 @@ pub fn run(scene: Scene, args: &Args) -> Result<(), String> {
         camera: Mutex::new(controller.desc()),
         size: Mutex::new(render_size(client, scale)),
         generation: AtomicU64::new(1),
-        frame: Mutex::new(Frame { generation: 0, w: 0, h: 0, accum: Vec::new(), block: 1, info: None, dirty: None }),
+        frame: Mutex::new(Frame { generation: 0, w: 0, h: 0, rows: new_rows(0, 0), block: 1, info: None, dirty: None }),
         version: AtomicU64::new(0),
         samples: AtomicU64::new(0),
         clock: Mutex::new(Stopwatch::default()),
@@ -336,8 +364,10 @@ pub fn run(scene: Scene, args: &Args) -> Result<(), String> {
         denoised: Vec::new(),
         denoise_key: None,
         last_denoise: now,
+        accum: Vec::new(),
         display: Vec::new(),
         display_size: (0, 0),
+        shown_spp: 0,
         full_resolve: true,
         needs_present: true,
         last_version: 0,
@@ -576,7 +606,7 @@ impl App<'_> {
             self.notify("nothing to save yet");
             return;
         }
-        let pixels = f.accum.clone();
+        let pixels: Vec<Pixel> = f.rows.iter().flat_map(|r| r.lock().unwrap().clone()).collect();
         let (w, h, block) = (f.w, f.h, f.block);
         drop(f);
         let snap = Snapshot { pixels: &pixels, w, h, block };
@@ -682,55 +712,59 @@ impl App<'_> {
         let depth_scale = self.depth_scale();
         let threshold = self.scene.settings.noise_threshold;
         let threads = renderer::thread_count(&self.scene);
-        let (w, h, block, info) = {
+        // Take the changed rows' range under the frame lock, then copy them one row lock at a time.
+        let (w, h, block, info, generation, rows, dirty) = {
             let mut f = self.shared.frame.lock().unwrap();
-            if (f.w, f.h) != self.display_size {
-                self.display = vec![0; f.w * f.h];
-                self.display_size = (f.w, f.h);
-                self.full_resolve = true;
-            }
-            let (w, h, block, info) = (f.w, f.h, f.block, f.info);
-            // The denoiser needs every pixel sampled, i.e. a completed full-resolution pass.
-            let denoise_view = self.denoise && self.view == View::Color && info.is_some_and(|i| i.block == 1);
-            if denoise_view != self.showing_denoised {
-                self.showing_denoised = denoise_view;
-                self.full_resolve = true;
-            }
-            if let (true, Some(i)) = (denoise_view, info) {
-                f.dirty = None;
-                let key = (f.generation, i.spp);
-                let stale = self.denoise_key.is_none_or(|k| k.0 != key.0);
-                if self.denoise_key != Some(key)
-                    && (stale || i.finished || self.last_denoise.elapsed() >= DENOISE_INTERVAL)
-                {
-                    let pixels = f.accum.clone();
-                    drop(f);
-                    self.denoised = denoise(&pixels, w, h, threads);
-                    self.denoise_key = Some(key);
-                    self.last_denoise = Instant::now();
-                    self.full_resolve = true;
-                }
-                if self.full_resolve {
-                    for (d, c) in self.display.iter_mut().zip(&self.denoised) {
-                        *d = self.encoder.encode(*c);
-                    }
-                }
-            } else {
-                let rows = if self.full_resolve { Some(0..h) } else { f.dirty.clone() };
-                f.dirty = None;
-                if let Some(rows) = rows {
-                    let shader = Shader {
-                        enc: &self.encoder,
-                        view: self.view,
-                        depth_scale,
-                        error_scale: if threshold > 0.0 { threshold } else { 0.02 },
-                        max_spp: info.map_or(1, |i| i.spp),
-                    };
-                    renderer::resolve_rows(&f.accum, w, h, block, rows, &shader, &mut self.display);
-                }
-            }
-            (w, h, block, info)
+            (f.w, f.h, f.block, f.info, f.generation, f.rows.clone(), f.dirty.take())
         };
+        let resized = (w, h) != self.display_size;
+        if resized {
+            self.display = vec![0; w * h];
+            self.accum = vec![Pixel::default(); w * h];
+            self.display_size = (w, h);
+            self.full_resolve = true;
+        }
+        let copy = if resized { Some(0..h) } else { dirty.clone() };
+        for y in copy.into_iter().flatten() {
+            self.accum[y * w..(y + 1) * w].copy_from_slice(&rows[y].lock().unwrap());
+        }
+        let spp = info.map_or(1, |i| i.spp);
+        if self.view == View::Samples && spp != self.shown_spp {
+            self.full_resolve = true; // the color scale changed
+        }
+
+        // The denoiser needs every pixel sampled, i.e. a completed full-resolution pass.
+        let denoise_view = self.denoise && self.view == View::Color && info.is_some_and(|i| i.block == 1);
+        if denoise_view != self.showing_denoised {
+            self.showing_denoised = denoise_view;
+            self.full_resolve = true;
+        }
+        if let (true, Some(i)) = (denoise_view, info) {
+            let key = (generation, i.spp);
+            let stale = self.denoise_key.is_none_or(|k| k.0 != key.0);
+            if self.denoise_key != Some(key) && (stale || i.finished || self.last_denoise.elapsed() >= DENOISE_INTERVAL)
+            {
+                self.denoised = denoise(&self.accum, w, h, threads);
+                self.denoise_key = Some(key);
+                self.last_denoise = Instant::now();
+                self.full_resolve = true;
+            }
+            if self.full_resolve {
+                for (d, c) in self.display.iter_mut().zip(&self.denoised) {
+                    *d = self.encoder.encode(*c);
+                }
+            }
+        } else if let Some(rows) = if self.full_resolve { Some(0..h) } else { dirty } {
+            let shader = Shader {
+                enc: &self.encoder,
+                view: self.view,
+                depth_scale,
+                error_scale: if threshold > 0.0 { threshold } else { 0.02 },
+                max_spp: spp,
+            };
+            renderer::resolve_rows(&self.accum, w, h, block, rows, &shader, &mut self.display);
+            self.shown_spp = spp;
+        }
         self.full_resolve = false;
         self.last_version = version;
 

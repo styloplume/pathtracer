@@ -1,4 +1,7 @@
-//! Native windowing. Only a Win32 backend exists so far (raw FFI, no crates).
+//! Native windowing through raw FFI, no crates: Win32 (GDI), X11 (Xlib, loaded at run
+//! time) and macOS (Cocoa through the Objective-C runtime). Each backend provides a
+//! `Window` with the same methods: `new`, `poll_events`, `client_size`, `present` and
+//! `set_title`.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Modifiers {
@@ -82,13 +85,23 @@ mod win32;
 #[cfg(windows)]
 pub use win32::Window;
 
-#[cfg(not(windows))]
+#[cfg(all(unix, not(target_os = "macos")))]
+mod x11;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use x11::Window;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::Window;
+
+#[cfg(not(any(windows, unix)))]
 pub struct Window;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 impl Window {
     pub fn new(_title: &str, _w: u32, _h: u32) -> Result<Window, String> {
-        Err("windowed mode is only implemented on Windows so far; use --headless".into())
+        Err("windowed mode is not implemented on this platform; use --headless".into())
     }
     pub fn poll_events(&mut self) -> Vec<Event> {
         Vec::new()

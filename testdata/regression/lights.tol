@@ -1,0 +1,4 @@
+# Limits for the block differences of the 'lights' regression test: 2x the difference
+# between two renders with different seeds (512 spp). Written by PT_BLESS=1.
+rms = 2.271
+max = 9.938

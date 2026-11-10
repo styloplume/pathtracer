@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version, rustfmt and clippy come from rust-toolchain.toml.
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - name: Clippy (lints as errors)
+        run: cargo lint
+
+      - name: Clippy for Intel macOS
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo clippy --target x86_64-apple-darwin --all-targets --locked -- -D warnings
+
+      - name: Docs
+        run: cargo doc --no-deps --document-private-items --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # Unit tests, the zero-allocation check and the reference-image regression tests.
+      - name: Test
+        run: cargo test --locked
+
+      - name: Upload regression images
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-${{ matrix.os }}
+          path: target/regression/
+          if-no-files-found: ignore
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: Benchmark
+        if: runner.os == 'Linux'
+        run: ./target/release/pathtracer bench --time 0.3 --csv bench.csv
+
+      - name: Upload benchmark
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench
+          path: bench.csv

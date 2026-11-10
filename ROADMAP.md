@@ -118,14 +118,24 @@ fraction, spatial filtering of guiding records; majorant grids (DDA) for sparse 
 equi-angular sampling for area lights and MIS with distance sampling; nested media with priorities; glass-bounded
 media reached through specular chains (BDPT / manifold walks); SSS with internal Fresnel reflection at exit points.
 
-## M7 — Platform & engineering
+## M7 — Platform & engineering ✅
 
-- [ ] Window backends for Linux (X11 via raw Xlib FFI) and macOS (Cocoa via objc FFI)
-- [ ] Reference-image regression tests (render small scenes, compare against stored results)
-- [ ] Benchmarks: rays/s per scene, BVH build time
-- [ ] CI (build, test, clippy, fmt)
-- [ ] Profiling pass: memory layout, lock contention, allocation-free hot paths
-- [ ] Scene format documentation (`docs/scene-format.md`)
+- [x] Window backends for Linux (X11: Xlib loaded with `dlopen`, so headless needs no X libraries; tested under WSLg)
+  and macOS (Cocoa through the Objective-C runtime, image via a Core Animation layer; checked by clippy for arm64 and
+  x86-64 and built in CI, not yet run on a Mac)
+- [x] Reference-image regression tests: every example scene, block-averaged comparison with per-scene tolerances
+  calibrated from seed-to-seed noise (`PT_BLESS=1` to regenerate)
+- [x] Benchmarks: `pathtracer bench` (load / BVH build time, primary / diffuse / shadow rays/s, paths/s, CSV output)
+- [x] CI on Linux, Windows and macOS (fmt, clippy, rustdoc, tests, release build, benchmark artifact)
+- [x] Profiling pass: per-row locks between render workers and the UI (workers were blocked 17% of the time; the window
+  now renders as fast as headless), traversal stack sized to the tree depth (~10% faster tracing on typical scenes), a
+  test proving the path-tracing hot path does not allocate
+- [x] Scene format documentation (`docs/scene-format.md`)
+
+Possible follow-ups: running the macOS backend on real hardware (HiDPI, trackpad scrolling); MIT-SHM for faster X11
+blits and Wayland; `_NET_WM_PID` and an application icon; triangle vertices stored in BVH order (fewer cache misses);
+cheaper camera-ray and light-sample generation (Sobol scrambling and light-BVH sampling dominate on simple scenes);
+profiling with hardware counters (`perf` needs `kernel.perf_event_paranoid` lowered in WSL).
 
 ## M8 — Procedural & implicit geometry
 

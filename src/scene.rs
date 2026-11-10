@@ -21,6 +21,7 @@ use crate::rng::hash64;
 use crate::sampler::SamplerKind;
 use crate::shapes::Shape;
 use crate::texture::TexCtx;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct RenderSettings {
@@ -221,6 +222,8 @@ pub struct Scene {
     pub(crate) prim_light: Vec<u32>,
     /// Point and spot lights (equi-angular sampling in media).
     pub(crate) point_lights: Vec<u32>,
+    /// Time `Scene::new` spent building the acceleration structures (BLAS + TLAS).
+    pub bvh_build_time: Duration,
 }
 
 /// Primitive ids are `0..triangles.len()` for triangles, followed by shapes.
@@ -256,9 +259,11 @@ impl Scene {
             light_sampler: LightSampler::default(),
             prim_light: Vec::new(),
             point_lights: Vec::new(),
+            bvh_build_time: Duration::ZERO,
         };
 
         // Primitives of each group.
+        let build_start = Instant::now();
         let nt = scene.triangles.len();
         let group_of = |groups: &[u32], i: usize| groups.get(i).copied().unwrap_or(0) as usize;
         let n_groups = 1 + geo
@@ -295,6 +300,7 @@ impl Scene {
         let inst_bounds: Vec<Aabb> =
             scene.instances.iter().map(|i| i.xf.bounds(&scene.blas[i.group as usize].bounds())).collect();
         scene.tlas = Bvh::build(&inst_bounds);
+        scene.bvh_build_time = build_start.elapsed();
 
         let instanced_emitters =
             members[1..].iter().flatten().any(|&p| scene.materials[scene.prim_material(p) as usize].is_emissive());
