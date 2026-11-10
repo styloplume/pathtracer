@@ -1,0 +1,173 @@
+# Participating media.
+#
+# - The room is filled with thin, forward-scattering haze: an invisible `interface` box
+#   whose interior is the "haze" medium. The spot light's cone and the shadows cast into
+#   it are volumetric.
+# - A turbulent smoke cloud: a heterogeneous medium whose density is a procedural noise
+#   field, inside a sphere boundary (its exterior is the haze again).
+# - A ball of milky orange liquid: a chromatic medium that scatters and absorbs.
+#
+# The haze stays below the lights: the glow of a small, intense light *inside* a medium is
+# found by indirect paths only by chance, which shows up as fireflies on everything it
+# lights indirectly. (Directly visible light from point and spot lights in media is
+# sampled equi-angularly and is clean.) Lights behind smooth glass can only reach a
+# medium inside it by chance too, so the liquid has an invisible boundary.
+#
+# Media are bounded by closed surfaces with outward normals: a material's `interior`
+# medium is inside them, `exterior` outside (default: vacuum). Rays that cross a
+# material without media keep the medium they were in.
+
+[render]
+width = 960
+height = 720
+spp = 1024
+max_depth = 12
+max_volume_depth = 64   # scattering events in media per path
+noise_threshold = 0.03
+exposure = 1.0
+
+[camera]
+position = [0, 1.3, 3.4]
+look_at = [0, 0.9, 0]
+fov = 50
+
+[background]
+color = [0, 0, 0]
+
+# --- Media -----------------------------------------------------------------------------
+
+[media.haze]
+albedo = 0.95          # single-scattering albedo
+density = 0.12         # extinction coefficient (per scene unit)
+g = 0.6                # Henyey-Greenstein asymmetry: forward scattering
+
+[media.smoke]
+albedo = [0.9, 0.88, 0.85]
+density = 9            # extinction where the field is 1
+g = 0.2
+# Density field: any world-space pattern texture, clamped to [0, 1] after `multiply`.
+field = { type = "turbulence", scale = 2.2, octaves = 6, low = 0, high = 1.4 }
+# A voxel grid works too: grid = "smoke.vol" (Mitsuba .vol, float32 or uint8), placed by
+# the bounding box stored in the file or by `min` / `max`.
+
+[media.juice]
+sigma_a = [0.4, 2.2, 6.0]   # absorption per unit: blue goes first
+sigma_s = [9, 8, 7]         # scattering per unit
+g = 0.3
+
+# --- Materials -------------------------------------------------------------------------
+
+[materials.haze_boundary]
+type = "interface"
+interior = "haze"
+
+[materials.smoke_boundary]
+type = "interface"
+interior = "smoke"
+exterior = "haze"
+
+[materials.juice_boundary]
+type = "interface"     # a "glass" material with interior media works too
+interior = "juice"
+exterior = "haze"
+
+[materials.lamp]
+type = "light"
+color = [0.6, 0.75, 1.0]
+intensity = 30
+
+[materials.wall]
+type = "diffuse"
+albedo = 0.6
+
+[materials.floor]
+type = "plastic"
+color = [0.25, 0.22, 0.2]
+roughness = 0.35
+
+[materials.blue]
+type = "diffuse"
+albedo = [0.1, 0.2, 0.55]
+
+# --- Lights ----------------------------------------------------------------------------
+
+[[lights]]
+type = "spot"
+position = [-1.2, 2.85, -0.8]
+look_at = [0.2, 0, 0.4]
+angle = 18
+inner_angle = 12
+temperature = 4500
+intensity = 40
+
+
+# --- Room ------------------------------------------------------------------------------
+
+[[objects]]   # the haze fills the room below the lights (and the camera is inside it)
+type = "box"
+min = [-1.99, 0.01, -1.99]
+max = [1.99, 2.4, 3.99]
+material = "haze_boundary"
+
+[[objects]]
+type = "box"
+min = [-2.2, -0.2, -2.2]
+max = [2.2, 0, 4.2]
+material = "floor"
+
+[[objects]]   # ceiling
+type = "box"
+min = [-2.2, 3, -2.2]
+max = [2.2, 3.2, 4.2]
+material = "wall"
+
+[[objects]]   # back wall
+type = "box"
+min = [-2.2, 0, -2.2]
+max = [2.2, 3, -2]
+material = "wall"
+
+[[objects]]   # front wall (behind the camera)
+type = "box"
+min = [-2.2, 0, 4]
+max = [2.2, 3, 4.2]
+material = "wall"
+
+[[objects]]   # left wall
+type = "box"
+min = [-2.2, 0, -2]
+max = [-2, 3, 4]
+material = "wall"
+
+[[objects]]   # right wall
+type = "box"
+min = [2, 0, -2]
+max = [2.2, 3, 4]
+material = "wall"
+
+# --- Contents --------------------------------------------------------------------------
+
+[[objects]]   # casts a volumetric shadow into the spot light's cone
+type = "box"
+size = [0.35, 0.35, 0.35]
+rotate = [20, 35, 0]
+translate = [-0.75, 1.75, -0.35]
+material = "blue"
+
+[[objects]]
+type = "sphere"
+center = [0.85, 1.05, -0.6]
+radius = 0.75
+material = "smoke_boundary"
+
+[[objects]]
+type = "sphere"
+center = [-0.35, 0.42, 0.55]
+radius = 0.4
+material = "juice_boundary"
+
+[[objects]]   # a small, cool lamp
+type = "sphere"
+center = [1.4, 2.6, 1.5]
+radius = 0.1
+material = "lamp"

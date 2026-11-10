@@ -3,7 +3,7 @@
 //! the frame for motion blur; each ray gets a time inside the shutter interval.
 
 use crate::math::{PI, Ray, Vec3};
-use crate::rng::Rng;
+use crate::sampler::Sampler;
 use crate::sampling::concentric_disk;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -154,9 +154,10 @@ impl Camera {
         }
     }
 
-    fn lens_offset(&self, b: &Basis, rng: &mut Rng) -> Vec3 {
+    fn lens_offset(&self, b: &Basis, s: &mut Sampler) -> Vec3 {
         if self.lens_radius > 0.0 {
-            let (dx, dy) = concentric_disk(rng.f32(), rng.f32());
+            let (u1, u2) = s.get2d();
+            let (dx, dy) = concentric_disk(u1, u2);
             b.u * (dx * self.lens_radius) + b.v * (dy * self.lens_radius)
         } else {
             Vec3::ZERO
@@ -166,8 +167,8 @@ impl Camera {
     /// The ray through image position (`s`, `t`): `s` goes left to right and `t` top to
     /// bottom, both in [0, 1]. None outside a fisheye's image circle.
     #[inline]
-    pub fn ray(&self, s: f32, t: f32, rng: &mut Rng) -> Option<Ray> {
-        let time = self.shutter[0] + (self.shutter[1] - self.shutter[0]) * rng.f32();
+    pub fn ray(&self, s: f32, t: f32, smp: &mut Sampler) -> Option<Ray> {
+        let time = self.shutter[0] + (self.shutter[1] - self.shutter[0]) * smp.get1d();
         let b = match &self.end {
             None => self.basis,
             Some(end) => self.basis_for(&self.start.lerp(end, time)),
@@ -177,7 +178,7 @@ impl Camera {
             Projection::Perspective => {
                 let target =
                     b.origin + (b.u * (x * self.aspect * self.half_fov) + b.v * (y * self.half_fov) - b.w) * b.focus;
-                let o = b.origin + self.lens_offset(&b, rng);
+                let o = b.origin + self.lens_offset(&b, smp);
                 (o, (target - o).normalize())
             }
             Projection::Orthographic => {
@@ -185,7 +186,7 @@ impl Camera {
                 let o = b.origin + b.u * (x * self.aspect * h) + b.v * (y * h);
                 if self.lens_radius > 0.0 {
                     let target = o - b.w * b.focus;
-                    let o = o + self.lens_offset(&b, rng);
+                    let o = o + self.lens_offset(&b, smp);
                     (o, (target - o).normalize())
                 } else {
                     (o, -b.w)
@@ -226,7 +227,7 @@ mod tests {
 
     #[test]
     fn center_rays_look_at_the_target() {
-        let mut rng = Rng::new(1, 2);
+        let mut rng = Sampler::independent(1, 2);
         let fwd = Vec3::new(0.0, 0.0, -1.0);
         for p in [Projection::Perspective, Projection::Orthographic, Projection::Fisheye, Projection::Equirect] {
             let cam = Camera::new(&desc(p), 2.0);
@@ -238,7 +239,7 @@ mod tests {
 
     #[test]
     fn projections_spread_rays_as_expected() {
-        let mut rng = Rng::new(3, 4);
+        let mut rng = Sampler::independent(3, 4);
         // Orthographic: parallel rays, origins spread over the view height (2 tan(20°) 5).
         let cam = Camera::new(&desc(Projection::Orthographic), 1.0);
         let (a, b) = (cam.ray(0.5, 0.0, &mut rng).unwrap(), cam.ray(0.5, 1.0, &mut rng).unwrap());
@@ -260,7 +261,7 @@ mod tests {
         d.motion = Some(Pose { position: Vec3::new(2.0, 1.0, 5.0), look_at: Vec3::new(2.0, 1.0, 0.0), up: d.up });
         d.shutter = [0.25, 0.25];
         let cam = Camera::new(&d, 1.0);
-        let r = cam.ray(0.5, 0.5, &mut Rng::new(0, 0)).unwrap();
+        let r = cam.ray(0.5, 0.5, &mut Sampler::independent(0, 0)).unwrap();
         assert!((r.time - 0.25).abs() < 1e-6 && (r.o.x - 0.5).abs() < 1e-5, "{r:?}");
     }
 }

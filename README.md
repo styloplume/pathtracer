@@ -9,8 +9,9 @@ cargo run --release -- scenes/spheres.toml --headless    # render to renders/sph
 
 Options: `--headless`, `-o FILE` (`.png` / `.hdr` / `.pfm` picks the format), `--spp N`, `--size WxH`, `--threads N`,
 `--time SECONDS` (time limit), `--noise T` (adaptive sampling threshold, e.g. `0.02`), `--denoise` (also save a
-denoised image), `--spectral` (hero-wavelength spectral rendering), `--autosave` (window: save when a render
-completes), `--scale N` (render at 1/N window resolution).
+denoised image), `--spectral` (hero-wavelength spectral rendering), `--sampler NAME` (`independent`, `sobol`,
+`bluenoise`), `--guiding` (path guiding), `--autosave` (window: save when a render completes), `--scale N` (render at
+1/N window resolution).
 
 Window controls (`F1` shows them in the window):
 
@@ -40,7 +41,11 @@ exposure and tonemap changes are kept unless that part of the file changed.
 ## Features
 
 - **Progressive display** filling the whole window: coarse 32×32 blocks refine by halving down to 1×1 (each level only traces pixels not yet traced, so the preview costs nothing extra), then whole-image passes accumulate samples per pixel.
-- **Integrator:** unidirectional path tracing, next-event estimation, MIS (power heuristic), Russian roulette; RGB or spectral.
+- **Integrator:** unidirectional volumetric path tracing, next-event estimation, MIS (power heuristic), Russian roulette; RGB or spectral.
+- **Participating media** (`[media.NAME]`, `scenes/media.toml`): homogeneous (`albedo` + `density`, or `sigma_a` / `sigma_s`; Henyey–Greenstein `g`) or heterogeneous, with the density from a world-space procedural `field` (noise, turbulence, checker) or a Mitsuba `.vol` voxel `grid`. A material's `interior` / `exterior` name the media on either side of its surfaces (`type = "interface"` is an invisible boundary; glass can hold a medium too). Homogeneous media sample distances analytically, heterogeneous ones by delta tracking (absorption as a weight) and ratio tracking for shadow rays; both use hero-channel spectral MIS, so strongly coloured media converge. Point and spot lights inside media are sampled equi-angularly. `max_volume_depth` caps scattering events.
+- **Subsurface scattering** (`type = "subsurface"`, `scenes/subsurface.toml`): random walk below a smooth or rough dielectric interface; `color` is the overall albedo (inverted to single-scattering coefficients after Chiang et al. 2016) and `radius` × `scale` the per-channel mean free path. Textured `color` works (coefficients come from the entry point).
+- **Path guiding** (`[render] guiding = true`, `scenes/guiding.toml`): an SD-tree (Müller et al. 2017, "Practical Path Guiding") learns the incident radiance per region of space during the first `guiding_spp` samples per pixel (iterations of 1, 2, 4, ... spp) and surface vertices then sample a 50/50 mixture of it and the BSDF. Helps scenes lit by strong indirect light (≈2× less variance at equal time in a Cornell box lit by a spot aimed at its ceiling); costs ~20% per sample otherwise.
+- **Low-discrepancy sampling** (`[render] sampler`): `sobol` (default) — Owen-scrambled Sobol points with shuffled sample order (Burley 2020), valid for any sample count, adaptive sampling and time limits (≈25% lower error than independent sampling at equal spp in the Cornell box); `bluenoise` — the same points shifted per pixel by a void-and-cluster blue-noise mask, so low-spp noise is high-frequency; `independent` — plain PCG32.
 - **Lights:**
   - area lights: any emissive sphere (sampled uniformly in the cone it subtends) or triangle (sampled uniformly in its spherical triangle, area sampling for tiny / huge solid angles);
   - `[[lights]]`: `point`, `spot` (smooth falloff between `inner_angle` and `angle`) and `directional` (delta, or with an angular diameter for soft shadows); `power` or `intensity`, `color` and/or a black-body `temperature`;
@@ -76,7 +81,10 @@ exposure and tonemap changes are kept unless that part of the file changed.
 | `src/app.rs` | windowed front end: UI thread, render thread, input, HUD, hot reload |
 | `src/controls.rs` | orbit / pan / look / fly camera controller |
 | `src/renderer.rs` | progressive coarse-to-fine scheduling, adaptive sampling, threading, progress callbacks, display views |
-| `src/integrator.rs` | path tracing with NEE + MIS, AOVs; generic over RGB / spectral |
+| `src/integrator.rs` | volumetric path tracing with NEE + MIS, subsurface walks, guided sampling, AOVs; generic over RGB / spectral |
+| `src/medium.rs` | media, free-flight sampling, transmittance, phase function, equi-angular sampling, `.vol` grids |
+| `src/guiding.rs` | path guiding SD-tree |
+| `src/sampler.rs` | independent / Owen-scrambled Sobol / blue-noise samplers |
 | `src/lights.rs` | light types, light sampling (sphere cones, spherical triangles), light BVH |
 | `src/environment.rs` | environment maps and their importance sampling |
 | `src/sky.rs` | Preetham sky and sun |
@@ -121,7 +129,8 @@ See `scenes/cornell.toml` for an annotated scene file, `scenes/materials.toml` f
 `scenes/lights.toml` for light types and many-light sampling, `scenes/sky.toml` for daylight, `scenes/envmap.toml`
 for image-based lighting, `scenes/dispersion.toml` for spectral rendering, `scenes/shapes.toml` for analytic shapes,
 glTF / STL import, motion blur and camera models, and `scenes/instancing.toml` for prototypes, instances and
-`scatter` (56 000 instances). `scenes/lib/materials.toml` is a material library to `include`.
+`scatter` (56 000 instances), `scenes/media.toml` for participating media, `scenes/subsurface.toml` for subsurface
+scattering and `scenes/guiding.toml` for path guiding. `scenes/lib/materials.toml` is a material library to `include`.
 
 Note: the glass `tint` parameter was replaced by Beer–Lambert absorption (`color` = transmittance after
 `distance` scene units); loading a scene that still uses `tint` reports this. `[background] type = "sky"` used to be

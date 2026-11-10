@@ -18,10 +18,11 @@
 
 use crate::camera::{Camera, CameraDesc};
 use crate::filter::Filter;
+use crate::guiding::Guide;
 use crate::image::{Encoder, pack_unorm};
 use crate::integrator::{PathSample, radiance};
 use crate::math::Vec3;
-use crate::rng::{Rng, hash64};
+use crate::sampler::Sampler;
 use crate::scene::Scene;
 use std::ops::Range;
 use std::sync::Mutex;
@@ -214,11 +215,26 @@ pub fn render_progressive(
         error: f32::NAN,
     };
 
+    // Path guiding trains in iterations of 1, 2, 4, ... samples per pixel (the preview
+    // counts as the first), then keeps its last distribution.
+    let mut guide = st.guiding.then(|| Guide::new(&scene.bounds()));
+    let end_guiding_iteration = |guide: &mut Option<Guide>, done: u32| {
+        if let Some(g) = guide
+            && g.recording()
+            && (done + 1).is_power_of_two()
+        {
+            g.end_iteration(done.div_ceil(2));
+            if done + 1 >= st.guiding_spp {
+                g.stop_recording();
+            }
+        }
+    };
+
     let mut first = true;
     loop {
         info.block = block as u32;
         progress.begin_pass(&info);
-        run_pass(&ctx, &mut pixels, Some((block, first)), 0, None, progress);
+        run_pass(&ctx, &mut pixels, Some((block, first)), 0, None, guide.as_ref(), progress);
         if progress.cancelled() {
             return None;
         }
@@ -234,6 +250,7 @@ pub fn render_progressive(
         }
         progress.end_pass(&pixels, &info);
         if block == 1 {
+            end_guiding_iteration(&mut guide, 1);
             break;
         }
         block /= 2;
@@ -247,10 +264,11 @@ pub fn render_progressive(
     while !info.finished {
         info.spp = sample + 1;
         progress.begin_pass(&info);
-        run_pass(&ctx, &mut pixels, None, sample, mask.as_deref(), progress);
+        run_pass(&ctx, &mut pixels, None, sample, mask.as_deref(), guide.as_ref(), progress);
         if progress.cancelled() {
             return None;
         }
+        end_guiding_iteration(&mut guide, sample + 1);
         let errors: Vec<f32> = pixels.iter().map(Pixel::error).collect();
         info.error = errors.iter().map(|e| e.min(1.0)).sum::<f32>() / errors.len().max(1) as f32;
         if threshold > 0.0 && info.spp >= min_spp {
@@ -295,6 +313,7 @@ fn run_pass(
     level: Option<(usize, bool)>,
     sample: u32,
     mask: Option<&[bool]>,
+    guide: Option<&Guide>,
     progress: &dyn Progress,
 ) {
     let w = ctx.w;
@@ -325,7 +344,7 @@ fn run_pass(
                         if row_mask.is_some_and(|m| !m[x]) {
                             continue;
                         }
-                        row[x].add(&trace_pixel(ctx, x, y, sample));
+                        row[x].add(&trace_pixel(ctx, x, y, sample, guide));
                         traced += 1;
                     }
                     if traced > 0 {
@@ -338,17 +357,17 @@ fn run_pass(
 }
 
 #[inline]
-fn trace_pixel(ctx: &Ctx<'_>, x: usize, y: usize, sample: u32) -> PathSample {
+fn trace_pixel(ctx: &Ctx<'_>, x: usize, y: usize, sample: u32, guide: Option<&Guide>) -> PathSample {
     let scene = ctx.scene;
-    let pixel_index = (y * ctx.w + x) as u64;
-    let seed = hash64(hash64(pixel_index ^ (scene.settings.seed << 40)) ^ u64::from(sample));
-    let mut rng = Rng::new(seed, pixel_index);
+    let st = &scene.settings;
+    let mut smp = Sampler::new(st.sampler, x as u32, y as u32, ctx.w as u32, sample, st.seed);
     // Filter importance sampling: the offset from the pixel center follows the filter.
-    let s = (x as f32 + 0.5 + ctx.filter.sample(rng.f32())) / ctx.w as f32;
-    let t = (y as f32 + 0.5 + ctx.filter.sample(rng.f32())) / ctx.h as f32;
+    let (u1, u2) = smp.get2d();
+    let s = (x as f32 + 0.5 + ctx.filter.sample(u1)) / ctx.w as f32;
+    let t = (y as f32 + 0.5 + ctx.filter.sample(u2)) / ctx.h as f32;
     // Outside a fisheye's image circle: black.
-    let Some(ray) = ctx.camera.ray(s, t, &mut rng) else { return PathSample::default() };
-    let mut ps = radiance(scene, ray, &mut rng);
+    let Some(ray) = ctx.camera.ray(s, t, &mut smp) else { return PathSample::default() };
+    let mut ps = radiance(scene, ray, &mut smp, guide);
     if !ps.radiance.is_finite() {
         ps.radiance = Vec3::ZERO;
     }

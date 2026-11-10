@@ -104,12 +104,19 @@ flattened); glTF cameras, `KHR_lights_punctual`, `KHR_texture_transform`, hard a
 motion keys and deformation blur; exact (analytic) motion bounds; SIMD intrinsics / BVH8 and spatial splits (SBVH);
 per-instance material overrides; cones and curves.
 
-## M6 — Advanced transport
+## M6 — Advanced transport ✅
 
-- [ ] Participating media: homogeneous volumes, then heterogeneous (delta tracking)
-- [ ] Subsurface scattering (random-walk)
-- [ ] Bidirectional path tracing or path guiding for caustics/indoor scenes
-- [ ] Low-discrepancy sampling (Sobol / blue-noise) instead of pure random
+- [x] Participating media: homogeneous (analytic free flight) and heterogeneous (delta / ratio tracking) volumes; procedural density fields and Mitsuba `.vol` grids; `interface` boundaries, `interior` / `exterior` media on any material
+- [x] Hero-channel spectral MIS for distance sampling (bounded weights for chromatic media and long random walks)
+- [x] Equi-angular sampling of point and spot lights inside media
+- [x] Subsurface scattering: random walk under a dielectric interface, albedo inversion (Chiang et al. 2016), textured colour
+- [x] Path guiding (Practical Path Guiding SD-tree, trained progressively, BSDF / guide mixture) — chosen over BDPT as it fits the progressive renderer, every camera model and media
+- [x] Low-discrepancy sampling: Owen-scrambled, shuffled Sobol (default) and a blue-noise variant (void-and-cluster mask)
+
+Possible follow-ups: guiding of volume vertices and product (BSDF × radiance) guiding, a learned BSDF / guide
+fraction, spatial filtering of guiding records; majorant grids (DDA) for sparse heterogeneous media; emissive media;
+equi-angular sampling for area lights and MIS with distance sampling; nested media with priorities; glass-bounded
+media reached through specular chains (BDPT / manifold walks); SSS with internal Fresnel reflection at exit points.
 
 ## M7 — Platform & engineering
 

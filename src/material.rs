@@ -10,7 +10,8 @@
 //! paths that enter and leave a closed object, which is the case this renderer targets.
 
 use crate::math::{INV_PI, PI, Vec3};
-use crate::rng::Rng;
+use crate::medium::{MediumInterface, subsurface_coefficients};
+use crate::sampler::Sampler;
 use crate::sampling::cosine_hemisphere;
 use crate::scene::Interaction;
 use crate::texture::{TexCtx, Texture};
@@ -26,6 +27,8 @@ pub struct Material {
     pub bump: Option<(Texture, f32)>,
     /// Coverage: 0 = cut out, 1 = opaque, in between = stochastic.
     pub alpha: Option<Texture>,
+    /// Media on the two sides of surfaces with this material; None keeps the path's medium.
+    pub media: Option<MediumInterface>,
 }
 
 pub enum MaterialKind {
@@ -44,6 +47,11 @@ pub enum MaterialKind {
     Principled(Box<Principled>),
     /// Area light. One-sided lights emit towards their geometric normal.
     Emissive { emission: Texture, two_sided: bool },
+    /// An invisible boundary: rays pass straight through (it only separates media).
+    Interface,
+    /// Random-walk subsurface scattering below a (smooth or rough) dielectric interface.
+    /// `color` is the multiple-scattering albedo, `radius` the mean free path per channel.
+    Subsurface { color: Texture, radius: Vec3, ior: f32, roughness: Texture, g: f32 },
 }
 
 pub enum MetalFresnel {
@@ -72,7 +80,23 @@ pub struct Principled {
 
 impl Material {
     pub fn new(kind: MaterialKind) -> Material {
-        Material { kind, normal_map: None, bump: None, alpha: None }
+        Material { kind, normal_map: None, bump: None, alpha: None, media: None }
+    }
+
+    pub fn is_interface(&self) -> bool {
+        matches!(self.kind, MaterialKind::Interface)
+    }
+
+    /// Interior scattering coefficients (`sigma_s`, `sigma_t`) and phase asymmetry of a
+    /// subsurface material at a shading point.
+    pub fn subsurface(&self, c: &TexCtx) -> Option<(Vec3, Vec3, f32)> {
+        match &self.kind {
+            MaterialKind::Subsurface { color, radius, g, .. } => {
+                let (ss, st) = subsurface_coefficients(color.eval(c), *radius);
+                Some((ss, st, *g))
+            }
+            _ => None,
+        }
     }
 
     pub fn diffuse(albedo: Vec3) -> Material {
@@ -104,7 +128,7 @@ impl Material {
     /// whether a ray enters or leaves); all others are shaded two-sided.
     pub fn is_transmissive(&self) -> bool {
         match &self.kind {
-            MaterialKind::Dielectric { .. } => true,
+            MaterialKind::Dielectric { .. } | MaterialKind::Subsurface { .. } | MaterialKind::Interface => true,
             MaterialKind::Principled(p) => p.transmission.constant().is_none_or(|t| t.x > 0.0),
             _ => false,
         }
@@ -208,7 +232,11 @@ impl Material {
                 b.push(Lobe::CoatedDiffuse { albedo: color.eval(c), ior: *ior, fdr: fdr_internal(*ior) }, 1.0);
             }
             MaterialKind::Principled(p) => p.build(c, wo, &mut b),
-            MaterialKind::Emissive { .. } => {}
+            MaterialKind::Subsurface { color, ior, roughness, .. } => {
+                b.push(Lobe::Reflect { alpha: rough(roughness), fresnel: Fresnel::Dielectric(*ior), ms: None }, 1.0);
+                b.push(Lobe::SubsurfaceEntry { albedo: color.eval(c), ior: *ior }, 1.0);
+            }
+            MaterialKind::Emissive { .. } | MaterialKind::Interface => {}
         }
         b.finish(wo);
         b
@@ -372,6 +400,13 @@ pub enum Lobe {
         ior: f32,
         fdr: f32,
     },
+    /// Diffuse transmission into a subsurface-scattering interior: the light that the
+    /// interface (with relative index `ior`) does not reflect enters cosine-distributed.
+    /// `albedo` only feeds the albedo AOV; the colour comes from the random walk inside.
+    SubsurfaceEntry {
+        albedo: Vec3,
+        ior: f32,
+    },
 }
 
 impl Lobe {
@@ -397,6 +432,7 @@ impl Lobe {
                 fresnel.eval(wo.z).luminance() + ms.map_or(0.0, |m| m.luminance() * 0.5)
             }
             Lobe::CoatedDiffuse { albedo, ior, .. } => (1.0 - fr_dielectric(wo.z, ior)) * albedo.luminance(),
+            Lobe::SubsurfaceEntry { ior, .. } => 1.0 - fr_dielectric(wo.z, ior),
             Lobe::Dielectric { .. } => 1.0,
         };
         w.max(1e-3)
@@ -405,7 +441,9 @@ impl Lobe {
     /// Reflectance-like color for the albedo AOV.
     fn albedo(&self) -> Vec3 {
         match *self {
-            Lobe::Lambert { albedo } | Lobe::CoatedDiffuse { albedo, .. } => albedo,
+            Lobe::Lambert { albedo } | Lobe::CoatedDiffuse { albedo, .. } | Lobe::SubsurfaceEntry { albedo, .. } => {
+                albedo
+            }
             Lobe::Sheen { .. } => Vec3::ZERO,
             Lobe::Reflect { fresnel, .. } => fresnel.eval(1.0),
             Lobe::Dielectric { tint, .. } => tint,
@@ -470,17 +508,32 @@ impl Lobe {
                 ) * k;
                 (f, wi.z * INV_PI)
             }
+            Lobe::SubsurfaceEntry { ior, .. } => {
+                if wo.z <= 0.0 || wi.z >= 0.0 {
+                    return zero;
+                }
+                let c = -wi.z * INV_PI;
+                (Vec3::splat((1.0 - fr_dielectric(wo.z, ior)) * c), c)
+            }
         }
     }
 
-    fn sample(&self, wo: Vec3, rng: &mut Rng) -> Option<BsdfSample> {
+    fn sample(&self, wo: Vec3, s: &mut Sampler) -> Option<BsdfSample> {
         match *self {
             Lobe::Lambert { .. } | Lobe::Sheen { .. } | Lobe::CoatedDiffuse { .. } => {
                 if wo.z <= 0.0 {
                     return None;
                 }
-                let wi = cosine_hemisphere(rng.f32(), rng.f32());
-                self.sample_from_eval(wo, wi)
+                let (u1, u2) = s.get2d();
+                self.sample_from_eval(wo, cosine_hemisphere(u1, u2))
+            }
+            Lobe::SubsurfaceEntry { .. } => {
+                if wo.z <= 0.0 {
+                    return None;
+                }
+                let (u1, u2) = s.get2d();
+                let wi = cosine_hemisphere(u1, u2);
+                self.sample_from_eval(wo, Vec3::new(wi.x, wi.y, -wi.z))
             }
             Lobe::Reflect { alpha: a, fresnel, ms } => {
                 if wo.z <= 0.0 {
@@ -491,8 +544,8 @@ impl Lobe {
                     return Some(BsdfSample { wi, weight: fresnel.eval(wo.z), pdf: 1.0, delta: true });
                 }
                 let ms_q = ms.map_or(0.0, |_| ms_probability(energy_table().e(wo.z, a)));
-                let (u1, u2) = (rng.f32(), rng.f32());
-                let wi = if rng.f32() < ms_q {
+                let (u1, u2) = s.get2d();
+                let wi = if s.get1d() < ms_q {
                     cosine_hemisphere(u1, u2)
                 } else {
                     let h = sample_ggx_vndf(wo, a, u1, u2);
@@ -517,7 +570,7 @@ impl Lobe {
                 }
                 if a < MIN_ALPHA {
                     let f = fr_dielectric(wo.z, ior);
-                    if rng.f32() < f {
+                    if s.get1d() < f {
                         let wi = Vec3::new(-wo.x, -wo.y, wo.z);
                         return Some(BsdfSample { wi, weight: Vec3::ONE, pdf: f, delta: true });
                     }
@@ -525,9 +578,10 @@ impl Lobe {
                     return Some(BsdfSample { wi, weight: tint, pdf: 1.0 - f, delta: true });
                 }
                 let up = if wo.z < 0.0 { -wo } else { wo };
-                let wm = sample_ggx_vndf(up, a, rng.f32(), rng.f32());
+                let (u1, u2) = s.get2d();
+                let wm = sample_ggx_vndf(up, a, u1, u2);
                 let r = fr_dielectric(wo.dot(wm), ior);
-                let wi = if rng.f32() < r {
+                let wi = if s.get1d() < r {
                     let wi = wm * (2.0 * wo.dot(wm)) - wo;
                     if wi.z * wo.z <= 0.0 {
                         return None;
@@ -564,6 +618,14 @@ pub struct Bsdf {
 }
 
 impl Bsdf {
+    /// A BSDF of one lobe.
+    pub fn single(lobe: Lobe, wo: Vec3) -> Bsdf {
+        let mut b = Bsdf::default();
+        b.push(lobe, 1.0);
+        b.finish(wo);
+        b
+    }
+
     pub fn push(&mut self, lobe: Lobe, weight: f32) {
         if weight > 0.0 && self.n < MAX_LOBES {
             self.lobes[self.n] = Some(lobe);
@@ -615,11 +677,11 @@ impl Bsdf {
         (f, pdf)
     }
 
-    pub fn sample(&self, wo: Vec3, rng: &mut Rng) -> Option<BsdfSample> {
+    pub fn sample(&self, wo: Vec3, s: &mut Sampler) -> Option<BsdfSample> {
         if self.n == 0 {
             return None;
         }
-        let u = rng.f32();
+        let u = s.get1d();
         let mut k = self.n - 1;
         let mut acc = 0.0;
         for i in 0..self.n {
@@ -634,7 +696,7 @@ impl Bsdf {
             return None;
         }
         let lobe = self.lobes[k].as_ref().unwrap();
-        let s = lobe.sample(wo, rng)?;
+        let s = lobe.sample(wo, s)?;
         if s.delta || self.n == 1 {
             let w = self.weight[k] / p;
             return Some(BsdfSample { wi: s.wi, weight: s.weight * w, pdf: s.pdf * p, delta: s.delta });
@@ -910,6 +972,7 @@ fn fdr_internal(ior: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::Rng;
 
     fn wo() -> Vec3 {
         Vec3::new(0.4, 0.1, 0.9).normalize()
@@ -918,10 +981,10 @@ mod tests {
     /// Checks `sample()` against `eval()` for non-delta samples and returns the
     /// estimated directional albedo (mean weight luminance).
     fn check(b: &Bsdf, wo: Vec3, n: usize) -> f32 {
-        let mut rng = Rng::new(7, 0);
+        let mut s = Sampler::independent(7, 0);
         let mut sum = 0.0;
         for _ in 0..n {
-            let Some(s) = b.sample(wo, &mut rng) else { continue };
+            let Some(s) = b.sample(wo, &mut s) else { continue };
             assert!(s.weight.is_finite() && s.pdf > 0.0);
             if !s.delta {
                 let (f, pdf) = b.eval(wo, s.wi);
@@ -1037,6 +1100,19 @@ mod tests {
         assert_eq!(b.n, 6);
         let e = check(&b, wo(), 60_000);
         assert!(e < 1.05 && e > 0.2, "principled albedo {e}");
+    }
+
+    #[test]
+    fn subsurface_entry_is_consistent() {
+        for a in [0.0f32, 0.3] {
+            let mut b = Bsdf::default();
+            b.push(Lobe::Reflect { alpha: a, fresnel: Fresnel::Dielectric(1.4), ms: None }, 1.0);
+            b.push(Lobe::SubsurfaceEntry { albedo: Vec3::ONE, ior: 1.4 }, 1.0);
+            b.finish(wo());
+            let e = check(&b, wo(), 60_000);
+            // Everything is either reflected by the interface or enters the object.
+            assert!(e <= 1.01 && e > 0.95, "alpha {a}: {e}");
+        }
     }
 
     #[test]

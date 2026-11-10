@@ -15,8 +15,10 @@ use crate::image::Tonemap;
 use crate::lights::{Light, LightSampler, LightSamplerKind};
 use crate::material::Material;
 use crate::math::{Frame, Ray, Transform, Trs, Vec3};
+use crate::medium::Medium;
 use crate::output::OutputSettings;
 use crate::rng::hash64;
+use crate::sampler::SamplerKind;
 use crate::shapes::Shape;
 use crate::texture::TexCtx;
 
@@ -52,6 +54,14 @@ pub struct RenderSettings {
     pub spectral: bool,
     /// How next-event estimation picks a light.
     pub light_sampler: LightSamplerKind,
+    /// Sample generator (independent, Sobol, blue noise).
+    pub sampler: SamplerKind,
+    /// Maximum number of scattering events in media (and subsurface random-walk steps).
+    pub max_volume_depth: u32,
+    /// Path guiding: learn where light comes from and sample those directions.
+    pub guiding: bool,
+    /// Samples per pixel spent training the guiding distribution (it is frozen after).
+    pub guiding_spp: u32,
 }
 
 impl Default for RenderSettings {
@@ -74,6 +84,10 @@ impl Default for RenderSettings {
             time_limit: 0.0,
             spectral: false,
             light_sampler: LightSamplerKind::Bvh,
+            sampler: SamplerKind::Sobol,
+            max_volume_depth: 256,
+            guiding: false,
+            guiding_spp: 128,
         }
     }
 }
@@ -188,6 +202,10 @@ pub struct Scene {
     /// libraries and textures); watched for hot reload.
     pub files: Vec<std::path::PathBuf>,
     pub output: OutputSettings,
+    /// Participating media, referenced by materials' medium interfaces.
+    pub media: Vec<Medium>,
+    /// True if any material declares media (paths must track the medium they are in).
+    pub(crate) has_media: bool,
     /// One BVH per geometry group; leaf indices are primitive ids.
     blas: Vec<Bvh>,
     instances: Vec<InstanceDesc>,
@@ -201,6 +219,8 @@ pub struct Scene {
     pub(crate) light_sampler: LightSampler,
     /// Light id of each primitive (`lights::NO_LIGHT` for non-emitters).
     pub(crate) prim_light: Vec<u32>,
+    /// Point and spot lights (equi-angular sampling in media).
+    pub(crate) point_lights: Vec<u32>,
 }
 
 /// Primitive ids are `0..triangles.len()` for triangles, followed by shapes.
@@ -213,6 +233,8 @@ impl Scene {
         geo: Geometry,
     ) -> Scene {
         let any_alpha = materials.iter().any(|m| m.alpha.is_some());
+        let has_media =
+            materials.iter().any(|m| m.media.is_some_and(|mi| mi.interior.is_some() || mi.exterior.is_some()));
         let mut scene = Scene {
             settings,
             camera,
@@ -224,6 +246,8 @@ impl Scene {
             shapes: geo.shapes,
             files: Vec::new(),
             output: OutputSettings::default(),
+            media: Vec::new(),
+            has_media,
             blas: Vec::new(),
             instances: Vec::new(),
             tlas: Bvh::build(&[]),
@@ -231,6 +255,7 @@ impl Scene {
             lights,
             light_sampler: LightSampler::default(),
             prim_light: Vec::new(),
+            point_lights: Vec::new(),
         };
 
         // Primitives of each group.

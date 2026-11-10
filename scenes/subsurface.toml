@@ -1,0 +1,117 @@
+# Subsurface scattering: random walks inside translucent objects.
+#
+# A `subsurface` material is a dielectric interface (specular `roughness`, `ior`) over a
+# dense scattering interior. Light enters, random-walks (up to `max_volume_depth` steps)
+# and leaves where it reaches the surface again. `color` is the overall (multiple-
+# scattering) albedo; `radius` is how far light travels inside per channel, times `scale`
+# (scene units). Thin parts and back-lit edges glow; compare the marble sphere with the
+# plain diffuse one next to it.
+
+[render]
+width = 1280
+height = 720
+spp = 1024
+max_depth = 12
+max_volume_depth = 256
+noise_threshold = 0.02
+
+[camera]
+position = [0, 1.6, 6.5]
+look_at = [0, 0.75, 0]
+fov = 32
+
+[background]
+type = "gradient"
+zenith = [0.03, 0.035, 0.05]
+horizon = [0.06, 0.06, 0.07]
+ground = [0.02, 0.02, 0.02]
+
+[materials.skin]
+type = "subsurface"
+color = [0.9, 0.62, 0.5]
+radius = [1.0, 0.4, 0.22]   # red light travels furthest
+scale = 0.12
+roughness = 0.35
+ior = 1.4
+
+[materials.jade]
+type = "subsurface"
+color = [0.35, 0.8, 0.5]
+radius = [0.35, 1.0, 0.6]
+scale = 0.12
+roughness = 0.1
+ior = 1.6
+g = 0.3
+
+[materials.marble]
+type = "subsurface"
+color = 0.88
+radius = 1
+scale = 0.15
+roughness = 0.05
+ior = 1.5
+
+[materials.diffuse_white]
+type = "diffuse"
+albedo = 0.88
+
+[materials.floor]
+type = "diffuse"
+albedo = 0.35
+
+[materials.key]
+type = "light"
+temperature = 4200
+intensity = 22
+
+[materials.fill]
+type = "light"
+temperature = 7500
+intensity = 1.2
+
+[[objects]]
+type = "box"
+min = [-10, -0.2, -10]
+max = [10, 0, 10]
+material = "floor"
+
+[[objects]]   # warm key light behind the objects: back-lit translucency
+type = "disk"
+center = [-1.0, 5.5, -4.0]
+normal = [0.2, -1, 0.8]
+radius = 0.9
+material = "key"
+
+[[objects]]   # soft, cool fill from the front
+type = "disk"
+center = [2.5, 3.5, 5]
+normal = [-0.4, -0.6, -1]
+radius = 2
+material = "fill"
+
+[[objects]]
+type = "mesh"
+file = "models/knot.gltf"
+scale = 0.75
+rotate = [0, 150, 0]
+translate = [-0.2, 0.95, -0.4]
+material = "skin"
+
+[[objects]]
+type = "mesh"
+file = "models/pawn.stl"
+scale = 0.9
+translate = [-1.9, 0, 0.6]
+material = "jade"
+
+[[objects]]
+type = "sphere"
+center = [1.35, 0.45, 0.8]
+radius = 0.45
+material = "marble"
+
+[[objects]]
+type = "sphere"
+center = [2.4, 0.45, 0.3]
+radius = 0.45
+material = "diffuse_white"

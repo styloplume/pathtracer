@@ -8,6 +8,7 @@ mod environment;
 mod filter;
 mod geometry;
 mod gltf;
+mod guiding;
 mod image;
 mod imageio;
 mod integrator;
@@ -17,12 +18,14 @@ mod lights;
 mod loader;
 mod material;
 mod math;
+mod medium;
 mod mesh;
 mod mtl;
 mod output;
 mod platform;
 mod renderer;
 mod rng;
+mod sampler;
 mod sampling;
 mod scene;
 mod shapes;
@@ -53,6 +56,8 @@ options:
   --noise THRESHOLD   adaptive sampling: stop pixels below this noise level (e.g. 0.02)
   --denoise           also save a denoised image
   --spectral          hero-wavelength spectral rendering (dispersion, spectral colour mixing)
+  --sampler NAME      sample generator: independent, sobol (default), bluenoise
+  --guiding           path guiding (learns where light comes from; for indoor scenes, caustics)
   --autosave          window mode: save whenever a render finishes
   --scale N           window mode: render at 1/N of the window resolution
 
@@ -77,6 +82,8 @@ pub(crate) struct Args {
     pub noise: Option<f32>,
     pub denoise: bool,
     pub spectral: bool,
+    pub sampler: Option<sampler::SamplerKind>,
+    pub guiding: bool,
     pub autosave: bool,
     pub scale: u32,
 }
@@ -94,6 +101,8 @@ fn parse_args() -> Result<Args, String> {
         noise: None,
         denoise: false,
         spectral: false,
+        sampler: None,
+        guiding: false,
         autosave: false,
         scale: 1,
     };
@@ -109,6 +118,14 @@ fn parse_args() -> Result<Args, String> {
             "--headless" => a.headless = true,
             "--denoise" => a.denoise = true,
             "--spectral" => a.spectral = true,
+            "--guiding" => a.guiding = true,
+            "--sampler" => {
+                let v = value(&arg)?;
+                a.sampler = Some(
+                    sampler::SamplerKind::parse(&v)
+                        .ok_or_else(|| format!("unknown sampler '{v}' ({})", sampler::SAMPLER_NAMES))?,
+                );
+            }
             "--autosave" => a.autosave = true,
             "-o" | "--output" => a.output = Some(PathBuf::from(value(&arg)?)),
             "--spp" => a.spp = Some(value(&arg)?.parse().map_err(|_| "--spp expects an integer")?),
@@ -180,6 +197,10 @@ pub(crate) fn apply_overrides(scene: &mut Scene, args: &Args) {
         s.noise_threshold = n;
     }
     s.spectral |= args.spectral;
+    s.guiding |= args.guiding;
+    if let Some(k) = args.sampler {
+        s.sampler = k;
+    }
     let o = &mut scene.output;
     if let Some(file) = &args.output {
         o.set_output_arg(file);

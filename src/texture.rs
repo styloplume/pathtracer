@@ -286,6 +286,19 @@ impl Texture {
         }
     }
 
+    /// An upper bound of `eval_f` over all of space, for textures that depend on position
+    /// only (constants and world-space patterns); None for UV-mapped ones.
+    pub fn spatial_bound(&self) -> Option<f32> {
+        match self {
+            Texture::Const(v) => Some(v.x),
+            Texture::Image(_) => None,
+            Texture::Scaled(t, s) => t.spatial_bound().filter(|_| s.x >= 0.0).map(|b| b * s.x),
+            Texture::Checker { even, odd, world, .. } | Texture::Noise { low: even, high: odd, world, .. } => {
+                if *world { Some(even.spatial_bound()?.max(odd.spatial_bound()?)) } else { None }
+            }
+        }
+    }
+
     /// Approximate average color (light power estimates).
     pub fn mean(&self) -> Vec3 {
         match self {

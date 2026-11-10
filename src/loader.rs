@@ -12,8 +12,10 @@ use crate::imageio;
 use crate::lights::{Light, LightSamplerKind};
 use crate::material::{METAL_PRESETS, Material, MaterialKind, MetalFresnel, Principled, metal_preset};
 use crate::math::{PI, Vec3};
+use crate::medium::{Density, Field, Medium, MediumInterface, load_vol};
 use crate::mtl::{self, MtlMap, MtlMaterial};
 use crate::output::{Aov, Format, OutputSettings};
+use crate::sampler::{SAMPLER_NAMES, SamplerKind};
 use crate::scene::{Geometry, InstanceDesc, RenderSettings, Scene};
 use crate::shapes::Shape;
 use crate::sky::{SUN_RADIUS, Sky};
@@ -50,6 +52,13 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
             lights.push(parse_light(t, &ctx)?);
         }
     }
+    for (name, v) in section("media")? {
+        let ctx = format!("[media.{name}]");
+        let t = v.as_table().ok_or_else(|| format!("{ctx} must be a table"))?;
+        let m = b.parse_medium(t, &ctx, &dir_of(t, base_dir))?;
+        b.medium_names.insert(name.clone(), b.media.len() as u32);
+        b.media.push(m);
+    }
     for (name, v) in section("materials")? {
         let ctx = format!("[materials.{name}]");
         let t = v.as_table().ok_or_else(|| format!("{ctx} must be a table"))?;
@@ -85,6 +94,7 @@ pub fn load_scene(path: &Path) -> Result<Scene, String> {
         instances: b.instances,
     };
     let mut scene = Scene::new(settings, camera, lights, b.materials, geo);
+    scene.media = b.media;
     scene.files = b.files;
     scene.output = output;
     Ok(scene)
@@ -202,6 +212,15 @@ fn parse_render(t: &Table) -> Result<RenderSettings, String> {
             Some(s) => LightSamplerKind::parse(s)
                 .ok_or_else(|| format!("{ctx}: unknown light_sampler '{s}' (bvh, power, uniform)"))?,
         },
+        sampler: match str_opt(t, "sampler", ctx)? {
+            None => d.sampler,
+            Some(s) => {
+                SamplerKind::parse(s).ok_or_else(|| format!("{ctx}: unknown sampler '{s}' ({SAMPLER_NAMES})"))?
+            }
+        },
+        max_volume_depth: u32_or(t, "max_volume_depth", d.max_volume_depth, ctx)?,
+        guiding: bool_or(t, "guiding", d.guiding, ctx)?,
+        guiding_spp: u32_or(t, "guiding_spp", d.guiding_spp, ctx)?.max(1),
     };
     if s.width == 0 || s.height == 0 {
         return Err(format!("{ctx}: width and height must be positive"));
@@ -494,6 +513,8 @@ struct Builder {
     mtl_ids: HashMap<(PathBuf, String), u32>,
     /// Scene material ids of glTF materials already converted, by (file, index).
     gltf_ids: HashMap<(PathBuf, usize), u32>,
+    media: Vec<Medium>,
+    medium_names: HashMap<String, u32>,
 }
 
 impl Builder {
@@ -781,6 +802,8 @@ impl Builder {
                 };
                 MaterialKind::Principled(Box::new(p))
             }
+            "subsurface" | "sss" => self.parse_subsurface(t, ctx, dir)?,
+            "interface" | "null" | "boundary" => MaterialKind::Interface,
             "emissive" | "light" | "emitter" => {
                 let e = self.tex_or(t, &["emission", "color"], Vec3::ONE, Color, ctx, dir)?;
                 // A black-body colour (luminance 1) multiplies any explicit colour.
@@ -794,7 +817,8 @@ impl Builder {
             }
             other => {
                 return Err(format!(
-                    "{ctx}: unknown material type '{other}' (diffuse, metal, glass, plastic, principled, light)"
+                    "{ctx}: unknown material type '{other}' (diffuse, metal, glass, plastic, principled, \
+                     subsurface, light, interface)"
                 ));
             }
         };
@@ -810,7 +834,109 @@ impl Builder {
         if let Some(v) = t.get("alpha") {
             m.alpha = Some(self.texture(v, "alpha", Alpha, ctx, dir)?);
         }
+        m.media = self.medium_interface(t, &m.kind, ctx)?;
         Ok(m)
+    }
+
+    /// `color`, `radius` (mean free path per channel) times `scale`, `ior`, `roughness`, `g`.
+    fn parse_subsurface(&mut self, t: &Table, ctx: &str, dir: &Path) -> Result<MaterialKind, String> {
+        let ior = f32_or(t, "ior", 1.4, ctx)?;
+        if ior < 1.0 {
+            return Err(format!("{ctx}: 'ior' must be at least 1"));
+        }
+        let radius = vec3_or(t, "radius", Vec3::new(1.0, 0.45, 0.25), ctx)? * f32_or(t, "scale", 0.1, ctx)?;
+        if !(radius.x > 0.0 && radius.y > 0.0 && radius.z > 0.0) {
+            return Err(format!("{ctx}: 'radius' and 'scale' must be positive"));
+        }
+        let g = f32_or(t, "g", 0.0, ctx)?;
+        if g.abs() >= 1.0 {
+            return Err(format!("{ctx}: 'g' must be in (-1, 1)"));
+        }
+        Ok(MaterialKind::Subsurface {
+            color: self.tex_or(t, &["color", "albedo"], Vec3::splat(0.8), TexKind::Color, ctx, dir)?,
+            radius,
+            ior,
+            roughness: self.tex_or(t, &["roughness"], Vec3::splat(0.3), TexKind::Scalar, ctx, dir)?,
+            g,
+        })
+    }
+
+    /// A material's `interior` (alias `medium`) and `exterior` media.
+    fn medium_interface(&self, t: &Table, kind: &MaterialKind, ctx: &str) -> Result<Option<MediumInterface>, String> {
+        let medium = |key: &str| -> Result<Option<u32>, String> {
+            match str_opt(t, key, ctx)? {
+                None => Ok(None),
+                Some(name) => self
+                    .medium_names
+                    .get(name)
+                    .copied()
+                    .map(Some)
+                    .ok_or_else(|| format!("{ctx}: unknown medium '{name}' (define it in [media.{name}])")),
+            }
+        };
+        let interior = match medium("interior")? {
+            Some(m) => Some(m),
+            None => medium("medium")?,
+        };
+        let exterior = medium("exterior")?;
+        if interior.is_some() || exterior.is_some() {
+            if matches!(kind, MaterialKind::Subsurface { .. }) {
+                return Err(format!("{ctx}: subsurface materials bring their own interior; no 'interior'/'exterior'"));
+            }
+            return Ok(Some(MediumInterface { interior, exterior }));
+        }
+        if matches!(kind, MaterialKind::Interface) {
+            return Err(format!("{ctx}: an interface needs 'interior' and/or 'exterior' media"));
+        }
+        Ok(None)
+    }
+
+    // -------------------------------------------------------------- media
+
+    /// `[media.name]`: homogeneous by default; `grid` (Mitsuba .vol) or `field` (a
+    /// world-space procedural texture) make the density vary.
+    fn parse_medium(&mut self, t: &Table, ctx: &str, dir: &Path) -> Result<Medium, String> {
+        let scale = f32_or(t, "scale", 1.0, ctx)?;
+        let (sigma_a, sigma_s) = if t.contains_key("sigma_a") || t.contains_key("sigma_s") {
+            (vec3_or(t, "sigma_a", Vec3::ZERO, ctx)?, vec3_or(t, "sigma_s", Vec3::ZERO, ctx)?)
+        } else {
+            let albedo = vec3_or(t, if t.contains_key("color") { "color" } else { "albedo" }, Vec3::splat(0.9), ctx)?;
+            if albedo.min(Vec3::ZERO) != Vec3::ZERO || albedo.max_elem() > 1.0 {
+                return Err(format!("{ctx}: 'albedo' must be in [0, 1]"));
+            }
+            let density = vec3_or(t, "density", Vec3::ONE, ctx)?;
+            ((Vec3::ONE - albedo) * density, albedo * density)
+        };
+        let (sigma_a, sigma_s) = (sigma_a * scale, sigma_s * scale);
+        if !(sigma_a.min(sigma_s).min(Vec3::ZERO) == Vec3::ZERO && sigma_a.is_finite() && sigma_s.is_finite()) {
+            return Err(format!("{ctx}: coefficients must be non-negative"));
+        }
+        let g = f32_or(t, "g", 0.0, ctx)?;
+        if g.abs() >= 1.0 {
+            return Err(format!("{ctx}: 'g' must be in (-1, 1)"));
+        }
+        let density = if let Some(file) = str_opt(t, "grid", ctx)? {
+            let path = dir.join(file);
+            let mut grid = load_vol(&path).map_err(|e| format!("{ctx}: {e}"))?;
+            self.track(&path);
+            grid.bounds.min = vec3_or(t, "min", grid.bounds.min, ctx)?;
+            grid.bounds.max = vec3_or(t, "max", grid.bounds.max, ctx)?;
+            let size = grid.bounds.max - grid.bounds.min;
+            if !(size.x > 0.0 && size.y > 0.0 && size.z > 0.0) {
+                return Err(format!("{ctx}: grid bounds 'min' must be below 'max'"));
+            }
+            let max = grid.max();
+            Some(Density { field: Field::Grid(grid), max })
+        } else if let Some(v) = t.get("field") {
+            let tex = self.texture(v, "field", TexKind::Scalar, ctx, dir)?;
+            let max = tex.spatial_bound().ok_or_else(|| {
+                format!("{ctx}: 'field' must be a world-space pattern (noise, or checker with space = \"world\")")
+            })?;
+            Some(Density { field: Field::Texture(tex), max: max.max(0.0) })
+        } else {
+            None
+        };
+        Ok(Medium { sigma_a, sigma_s, g, density })
     }
 
     fn default_material(&mut self) -> u32 {

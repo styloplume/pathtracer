@@ -19,7 +19,7 @@
 use crate::environment::Environment;
 use crate::geometry::Aabb;
 use crate::math::{Frame, PI, Ray, Vec3, offset_origin};
-use crate::rng::Rng;
+use crate::sampler::Sampler;
 use crate::sampling::{
     ONE_MINUS_EPSILON, angle_between, sample_spherical_triangle, spherical_triangle_area, uniform_cone,
     uniform_triangle,
@@ -163,15 +163,16 @@ impl Scene {
 
     /// Picks a light for shading point `p` with normal `n` (zero if none) and samples
     /// a direction towards it.
-    pub fn sample_light(&self, p: Vec3, n: Vec3, rng: &mut Rng) -> Option<LightSample> {
-        let (li, pmf) = self.light_sampler.sample(p, n, rng.f32())?;
-        let (u1, u2) = (rng.f32(), rng.f32());
+    pub fn sample_light(&self, p: Vec3, n: Vec3, s: &mut Sampler) -> Option<LightSample> {
+        let u = s.get1d();
+        let (u1, u2) = s.get2d();
+        let (li, pmf) = self.light_sampler.sample(p, n, u)?;
         let mut ls = self.sample_one_light(li, p, u1, u2)?;
         ls.pdf *= pmf;
         (ls.pdf > 0.0 && !ls.radiance.is_black()).then_some(ls)
     }
 
-    fn sample_one_light(&self, li: u32, p: Vec3, u1: f32, u2: f32) -> Option<LightSample> {
+    pub(crate) fn sample_one_light(&self, li: u32, p: Vec3, u1: f32, u2: f32) -> Option<LightSample> {
         match &self.lights[li as usize] {
             Light::Area { prim } => self.sample_area_light(*prim, p, u1, u2),
             Light::Point { pos, intensity } => {
@@ -369,6 +370,9 @@ impl Scene {
                 self.lights.push(Light::Area { prim });
             }
         }
+        self.point_lights = (0..self.lights.len() as u32)
+            .filter(|&i| matches!(self.lights[i as usize], Light::Point { .. } | Light::Spot { .. }))
+            .collect();
         let mut infinite = Vec::new();
         let mut bounded = Vec::new();
         for (i, l) in self.lights.iter().enumerate() {
@@ -768,6 +772,7 @@ impl LightBvh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::Rng;
 
     fn point_bounds(p: Vec3, phi: f32) -> LightBounds {
         LightBounds { bounds: Aabb { min: p, max: p }, w: Vec3::Z, phi, cos_o: -1.0, cos_e: 0.0, two_sided: false }
@@ -828,10 +833,10 @@ mod tests {
         let scene =
             Scene::new(RenderSettings::default(), crate::camera::CameraDesc::default(), vec![], vec![light], geo);
         let (p, n) = (c, Vec3::new(0.0, 1.0, 0.0));
-        let mut rng = Rng::new(3, 4);
+        let mut s = Sampler::independent(3, 4);
         let (mut lit, mut total) = (0, 0);
         for _ in 0..2000 {
-            if let Some(ls) = scene.sample_light(p, n, &mut rng) {
+            if let Some(ls) = scene.sample_light(p, n, &mut s) {
                 total += 1;
                 if !scene.occluded_light(p, n, &ls, 0.0) {
                     lit += 1;

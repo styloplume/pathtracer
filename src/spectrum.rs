@@ -34,15 +34,34 @@ pub trait Color:
     + Mul<f32, Output = Self>
     + MulAssign<f32>
 {
+    /// Number of channels.
+    const N: usize;
     fn splat(v: f32) -> Self;
     fn max_elem(self) -> f32;
     fn is_black(self) -> bool;
     fn is_finite(self) -> bool;
+    fn channel(self, i: usize) -> f32;
+    fn map(self, f: impl Fn(f32) -> f32) -> Self;
+    /// Mean over the channels.
+    fn avg(self) -> f32;
 }
 
 impl Color for Vec3 {
+    const N: usize = 3;
     fn splat(v: f32) -> Self {
         Vec3::splat(v)
+    }
+    #[inline]
+    fn channel(self, i: usize) -> f32 {
+        self[i]
+    }
+    #[inline]
+    fn map(self, f: impl Fn(f32) -> f32) -> Self {
+        Vec3::new(f(self.x), f(self.y), f(self.z))
+    }
+    #[inline]
+    fn avg(self) -> f32 {
+        (self.x + self.y + self.z) * (1.0 / 3.0)
     }
     fn max_elem(self) -> f32 {
         Vec3::max_elem(self)
@@ -138,8 +157,21 @@ impl MulAssign<f32> for Spectrum {
 }
 
 impl Color for Spectrum {
+    const N: usize = N;
     fn splat(v: f32) -> Self {
         Spectrum([v; N])
+    }
+    #[inline]
+    fn channel(self, i: usize) -> f32 {
+        self.0[i]
+    }
+    #[inline]
+    fn map(self, f: impl Fn(f32) -> f32) -> Self {
+        Spectrum(self.0.map(f))
+    }
+    #[inline]
+    fn avg(self) -> f32 {
+        self.0.iter().sum::<f32>() * (1.0 / N as f32)
     }
     fn max_elem(self) -> f32 {
         self.0.iter().copied().fold(f32::NEG_INFINITY, f32::max)
