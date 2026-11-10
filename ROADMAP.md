@@ -127,6 +127,24 @@ media reached through specular chains (BDPT / manifold walks); SSS with internal
 - [ ] Profiling pass: memory layout, lock contention, allocation-free hot paths
 - [ ] Scene format documentation (`docs/scene-format.md`)
 
+## M8 — Procedural & implicit geometry
+
+References: Perlin & Hoffert, *Hypertexture* (SIGGRAPH 1989); Hart, *Sphere Tracing: A Geometric Method for the
+Antialiased Ray Tracing of Implicit Surfaces* (The Visual Computer, 1996); Hart, Sandin & Kauffman, *Ray Tracing
+Deterministic 3-D Fractals* (SIGGRAPH 1989).
+
+- [ ] 3D noise with analytic gradients; Musgrave multifractals (ridged, hybrid, heterogeneous terrain) and domain warping
+- [ ] Fractal bump mapping from the solid-noise gradient (no UVs needed), octaves clamped by the ray footprint against aliasing
+- [ ] `Implicit` shape: sphere tracing inside a bounding box in the BVH, with Lipschitz bounds for safe steps, normals from
+  the field gradient, and robust hit epsilon / spawn offsets for f32
+- [ ] Distance fields: SDF primitives and smooth CSG (union / intersection / difference, blends)
+- [ ] Hypertexture: soft object density × noise / turbulence shaped by `bias` / `gain` (eroded, cavity-filled solids)
+  - [ ] as a surface: a level set of the density, sphere-traced through `Implicit`
+  - [ ] as a volume: the density as a heterogeneous medium (reuses the M6 media code)
+- [ ] Deterministic 3D fractals: quaternion Julia sets (3D slice of 4D, unbounding-sphere distance estimator, `c` /
+  iterations / slice plane parameters); then Mandelbulb and Menger sponge as further estimators
+- [ ] Solid (world / object space) texturing for surfaces without UVs; example scenes and regression references for each
+
 ---
 
 Ideas not yet placed: network/distributed rendering, GPU backend, animation sequences,
