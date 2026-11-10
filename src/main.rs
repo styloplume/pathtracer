@@ -14,6 +14,7 @@ mod gltf;
 mod guiding;
 mod image;
 mod imageio;
+mod implicit;
 mod integrator;
 mod jpeg;
 mod json;
@@ -24,6 +25,7 @@ mod math;
 mod medium;
 mod mesh;
 mod mtl;
+mod noise;
 mod output;
 mod platform;
 #[cfg(test)]

@@ -223,8 +223,8 @@ impl Scene {
 
     fn sample_area_light(&self, prim: u32, p: Vec3, u1: f32, u2: f32) -> Option<LightSample> {
         let (lp, ln, uv, mat, pdf_solid) = if let Some(s) = self.shape(prim) {
-            let cone = match s.kind {
-                ShapeKind::Sphere { center, radius } => sphere_cone(center, radius, p).map(|c| (center, radius, c)),
+            let cone = match &s.kind {
+                &ShapeKind::Sphere { center, radius } => sphere_cone(center, radius, p).map(|c| (center, radius, c)),
                 _ => None,
             };
             if let Some((center, radius, (cos_max, one_minus))) = cone {
@@ -265,7 +265,8 @@ impl Scene {
             let uv = self.hit_uv(&Hit { t: 0.0, prim, inst: 0, b1, b2 }, lp);
             (lp, self.tri_normals(tri, b1, b2).0, uv, tri.material, pdf_solid)
         };
-        let (radiance, two_sided) = self.materials[mat as usize].emission(&TexCtx { uv, p: lp })?;
+        let (radiance, two_sided) =
+            self.materials[mat as usize].emission(&TexCtx { uv, p: lp, ..TexCtx::default() })?;
         let d = lp - p;
         let dist2 = d.length_squared();
         if dist2 <= 0.0 {
@@ -301,13 +302,13 @@ impl Scene {
             let cos_l = (d.dot(nl) / dist2.sqrt()).abs();
             dist2 / (cos_l.max(1e-8) * self.prim_area(prim))
         };
-        let pdf = match self.shape(prim).map(|s| s.kind) {
+        let pdf = match self.shape(prim).map(|s| &s.kind) {
             None => {
                 let (p0, p1, p2) = self.tri_points(&self.triangles[prim as usize]);
                 let omega = spherical_triangle_area([p0, p1, p2], p);
                 if (MIN_SPHERICAL_AREA..=MAX_SPHERICAL_AREA).contains(&omega) { 1.0 / omega } else { area_pdf() }
             }
-            Some(ShapeKind::Sphere { center, radius }) => {
+            Some(&ShapeKind::Sphere { center, radius }) => {
                 sphere_cone(center, radius, p).map_or_else(area_pdf, |(_, om)| 1.0 / (2.0 * PI * om))
             }
             Some(_) => area_pdf(),
@@ -331,9 +332,9 @@ impl Scene {
                 };
                 let phi = lum * self.prim_area(*prim) * if two_sided { 2.0 } else { 1.0 };
                 // Flat emitters emit into the hemisphere of their normal, curved ones everywhere.
-                let (w, cos_o) = match self.shape(*prim).map(|s| s.kind) {
+                let (w, cos_o) = match self.shape(*prim).map(|s| &s.kind) {
                     None => (self.tri_normals(&self.triangles[*prim as usize], 1.0 / 3.0, 1.0 / 3.0).0, 1.0),
-                    Some(ShapeKind::Disk { frame, .. }) => (frame.n, 1.0),
+                    Some(&ShapeKind::Disk { frame, .. }) => (frame.n, 1.0),
                     Some(_) => (Vec3::Z, -1.0),
                 };
                 LightBounds { bounds: self.prim_bounds(*prim), w, phi, cos_o, cos_e: 0.0, two_sided }

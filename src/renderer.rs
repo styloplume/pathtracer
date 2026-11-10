@@ -16,7 +16,7 @@
 //! Progress is reported through [`Progress`]: per finished row (so long passes can
 //! be displayed while they run) and per finished pass.
 
-use crate::camera::{Camera, CameraDesc};
+use crate::camera::{Camera, CameraDesc, RayCone};
 use crate::filter::Filter;
 use crate::guiding::Guide;
 use crate::image::{Encoder, pack_unorm};
@@ -174,6 +174,7 @@ pub fn thread_count(scene: &Scene) -> usize {
 struct Ctx<'a> {
     scene: &'a Scene,
     camera: Camera,
+    cone: RayCone,
     filter: Filter,
     w: usize,
     h: usize,
@@ -190,9 +191,11 @@ pub fn render_progressive(
     progress: &dyn Progress,
 ) -> Option<Vec<Pixel>> {
     let st = &scene.settings;
+    let cam = Camera::new(camera, w as f32 / h as f32);
     let ctx = Ctx {
         scene,
-        camera: Camera::new(camera, w as f32 / h as f32),
+        cone: cam.cone(h),
+        camera: cam,
         filter: Filter::new(st.filter, st.filter_radius),
         w,
         h,
@@ -367,7 +370,7 @@ fn trace_pixel(ctx: &Ctx<'_>, x: usize, y: usize, sample: u32, guide: Option<&Gu
     let t = (y as f32 + 0.5 + ctx.filter.sample(u2)) / ctx.h as f32;
     // Outside a fisheye's image circle: black.
     let Some(ray) = ctx.camera.ray(s, t, &mut smp) else { return PathSample::default() };
-    let mut ps = radiance(scene, ray, &mut smp, guide);
+    let mut ps = radiance(scene, ray, ctx.cone, &mut smp, guide);
     if !ps.radiance.is_finite() {
         ps.radiance = Vec3::ZERO;
     }

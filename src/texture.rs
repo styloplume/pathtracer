@@ -1,16 +1,24 @@
-//! Textures: images (bilinear or nearest lookup, wrap modes, sRGB decoding) and
-//! procedural patterns (checker, Perlin fBm / turbulence). Textures are evaluated at a
-//! `TexCtx` holding the surface UV (OBJ convention: v = 0 at the bottom of the image)
-//! and the world-space position.
+//! Textures: images (bilinear or nearest lookup, wrap modes, sRGB decoding, triplanar
+//! projection) and procedural patterns (checker; solid noise fractals, marble and wood,
+//! see `noise.rs`; hypertexture density). Textures are evaluated at a `TexCtx` holding
+//! the surface UV (OBJ convention: v = 0 at the bottom of the image), the position and
+//! normal in texture space (object space of instances, world space otherwise) and the
+//! ray footprint, which solid patterns use against aliasing.
 
 use crate::imageio::{Pixels, RawImage};
+use crate::implicit::Hypertexture;
 use crate::math::Vec3;
+use crate::noise::Fractal;
 use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TexCtx {
     pub uv: [f32; 2],
     pub p: Vec3,
+    /// Geometric normal in the same space as `p` (zero where there is no surface).
+    pub n: Vec3,
+    /// Width of the pixel's footprint at `p` in texture-space units; 0 = unknown (full detail).
+    pub footprint: f32,
 }
 
 // ---------------------------------------------------------------------------- images
@@ -217,6 +225,17 @@ impl ImageTex {
 
 // ---------------------------------------------------------------------------- textures
 
+/// Solid patterns: noise fractals and the patterns built on them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pattern {
+    /// A fractal of `noise.rs`, roughly in [0, 1].
+    Fractal,
+    /// Marble veins; `amount` is the turbulence bending them.
+    Marble { amount: f32 },
+    /// Wood rings around the y axis; `amount` is the fBm wobble.
+    Wood { amount: f32 },
+}
+
 pub enum Texture {
     Const(Vec3),
     Image(Box<ImageTex>),
@@ -228,15 +247,22 @@ pub enum Texture {
         scale: f32,
         world: bool,
     },
-    /// Blends `low` -> `high` by Perlin fBm (or turbulence).
+    /// Blends `low` -> `high` by a solid pattern (clamped to [0, 1]).
     Noise {
         low: Box<Texture>,
         high: Box<Texture>,
-        scale: f32,
-        octaves: u32,
-        turbulence: bool,
+        fractal: Fractal,
+        pattern: Pattern,
         world: bool,
     },
+    /// A texture projected along the three axes and blended by the normal (for surfaces
+    /// without UVs): uv = (z, y), (x, z), (x, y) of the point.
+    Triplanar {
+        tex: Box<Texture>,
+        sharpness: f32,
+    },
+    /// Density of a hypertexture (all channels).
+    Hyper(Arc<Hypertexture>),
 }
 
 impl Texture {
@@ -262,7 +288,14 @@ impl Texture {
                     even.eval(c)
                 }
             }
-            Texture::Noise { low, high, .. } => low.eval(c).lerp(high.eval(c), self.noise_t(c)),
+            Texture::Noise { low, high, .. } => low.eval(c).lerp(high.eval(c), self.pattern_t(c)),
+            Texture::Triplanar { tex, sharpness } => {
+                let (w, uvs) = triplanar(c, *sharpness);
+                (0..3)
+                    .filter(|&k| w[k] > 0.0)
+                    .fold(Vec3::ZERO, |acc, k| acc + tex.eval(&TexCtx { uv: uvs[k], ..*c }) * w[k])
+            }
+            Texture::Hyper(h) => Vec3::splat(h.density(c.p)),
         }
     }
 
@@ -280,9 +313,36 @@ impl Texture {
                 }
             }
             Texture::Noise { low, high, .. } => {
-                let t = self.noise_t(c);
+                let t = self.pattern_t(c);
                 low.eval_f(c) * (1.0 - t) + high.eval_f(c) * t
             }
+            Texture::Triplanar { tex, sharpness } => {
+                let (w, uvs) = triplanar(c, *sharpness);
+                (0..3).filter(|&k| w[k] > 0.0).map(|k| tex.eval_f(&TexCtx { uv: uvs[k], ..*c }) * w[k]).sum()
+            }
+            Texture::Hyper(h) => h.density(c.p),
+        }
+    }
+
+    /// The scalar value and its gradient with respect to the texture-space position, for
+    /// textures that are smooth functions of position (constants and world-space
+    /// patterns between constants); None for everything else.
+    pub fn eval_grad(&self, c: &TexCtx) -> Option<(f32, Vec3)> {
+        match self {
+            Texture::Const(v) => Some((v.x, Vec3::ZERO)),
+            Texture::Scaled(t, s) => t.eval_grad(c).map(|(v, g)| (v * s.x, g * s.x)),
+            Texture::Noise { low, high, fractal, pattern, world: true } => {
+                let (a, b) = (low.constant()?.x, high.constant()?.x);
+                let (t, g) = match *pattern {
+                    Pattern::Fractal => fractal.eval_grad(c.p, c.footprint),
+                    Pattern::Marble { amount } => fractal.marble_grad(c.p, amount, c.footprint),
+                    Pattern::Wood { amount } => fractal.wood_grad(c.p, amount, c.footprint),
+                };
+                // Clamping flattens the pattern where it leaves [0, 1].
+                let g = if (0.0..=1.0).contains(&t) { g * (b - a) } else { Vec3::ZERO };
+                Some((a + (b - a) * t.clamp(0.0, 1.0), g))
+            }
+            _ => None,
         }
     }
 
@@ -291,11 +351,21 @@ impl Texture {
     pub fn spatial_bound(&self) -> Option<f32> {
         match self {
             Texture::Const(v) => Some(v.x),
-            Texture::Image(_) => None,
+            Texture::Image(_) | Texture::Triplanar { .. } => None,
             Texture::Scaled(t, s) => t.spatial_bound().filter(|_| s.x >= 0.0).map(|b| b * s.x),
             Texture::Checker { even, odd, world, .. } | Texture::Noise { low: even, high: odd, world, .. } => {
                 if *world { Some(even.spatial_bound()?.max(odd.spatial_bound()?)) } else { None }
             }
+            Texture::Hyper(_) => Some(1.0),
+        }
+    }
+
+    /// The region outside which the texture is zero, if it has one (hypertextures).
+    pub fn support(&self) -> Option<crate::geometry::Aabb> {
+        match self {
+            Texture::Hyper(h) => Some(h.bounds()),
+            Texture::Scaled(t, _) => t.support(),
+            _ => None,
         }
     }
 
@@ -305,8 +375,11 @@ impl Texture {
             Texture::Const(v) => *v,
             Texture::Image(t) => t.img.mean,
             Texture::Scaled(t, s) => t.mean() * *s,
-            Texture::Checker { even, odd, .. } => (even.mean() + odd.mean()) * 0.5,
-            Texture::Noise { low, high, .. } => (low.mean() + high.mean()) * 0.5,
+            Texture::Checker { even, odd, .. } | Texture::Noise { low: even, high: odd, .. } => {
+                (even.mean() + odd.mean()) * 0.5
+            }
+            Texture::Triplanar { tex, .. } => tex.mean(),
+            Texture::Hyper(_) => Vec3::splat(0.5),
         }
     }
 
@@ -321,103 +394,39 @@ impl Texture {
         }
     }
 
-    fn pattern_point(c: &TexCtx, scale: f32, world: bool) -> Vec3 {
-        if world { c.p * scale } else { Vec3::new(c.uv[0] * scale, c.uv[1] * scale, 0.0) }
-    }
-
     fn checker_odd(&self, c: &TexCtx) -> bool {
         let Texture::Checker { scale, world, .. } = self else { return false };
-        let p = Self::pattern_point(c, *scale, *world);
+        let p = if *world { c.p * *scale } else { Vec3::new(c.uv[0] * scale, c.uv[1] * scale, 0.0) };
         // A tiny bias keeps axis-aligned planes at integer coordinates from flickering.
         let f = |v: f32| (v + 1e-4).floor() as i64;
         (f(p.x) + f(p.y) + f(p.z)) & 1 == 1
     }
 
-    fn noise_t(&self, c: &TexCtx) -> f32 {
-        let Texture::Noise { scale, octaves, turbulence, world, .. } = self else { return 0.0 };
-        let p = Self::pattern_point(c, *scale, *world);
-        if *turbulence { (2.0 * turbulence_fn(p, *octaves)).min(1.0) } else { (0.5 + fbm(p, *octaves)).clamp(0.0, 1.0) }
+    /// Blend weight of a pattern texture, clamped to [0, 1]. World-space patterns drop
+    /// the octaves finer than the footprint; UV-space ones have no footprint to go by.
+    fn pattern_t(&self, c: &TexCtx) -> f32 {
+        let Texture::Noise { fractal, pattern, world, .. } = self else { return 0.0 };
+        let (p, fp) = if *world { (c.p, c.footprint) } else { (Vec3::new(c.uv[0], c.uv[1], 0.0), 0.0) };
+        let t = match *pattern {
+            Pattern::Fractal => fractal.eval(p, fp),
+            Pattern::Marble { amount } => fractal.marble(p, amount, fp),
+            Pattern::Wood { amount } => fractal.wood(p, amount, fp),
+        };
+        t.clamp(0.0, 1.0)
     }
 }
 
-// ---------------------------------------------------------------------------- noise
-
-fn permutation() -> &'static [u8; 512] {
-    static PERM: OnceLock<[u8; 512]> = OnceLock::new();
-    PERM.get_or_init(|| {
-        let mut p: [u8; 256] = std::array::from_fn(|i| i as u8);
-        let mut rng = crate::rng::Rng::new(0x5EED, 7);
-        for i in (1..256).rev() {
-            let j = (rng.next_u32() as usize) % (i + 1);
-            p.swap(i, j);
-        }
-        std::array::from_fn(|i| p[i & 255])
-    })
-}
-
-#[inline]
-fn grad(hash: u8, x: f32, y: f32, z: f32) -> f32 {
-    let h = hash & 15;
-    let u = if h < 8 { x } else { y };
-    let v = if h < 4 {
-        y
-    } else if h == 12 || h == 14 {
-        x
-    } else {
-        z
-    };
-    (if h & 1 == 0 { u } else { -u }) + (if h & 2 == 0 { v } else { -v })
-}
-
-/// Improved Perlin noise, roughly in [-1, 1].
-pub fn perlin(p: Vec3) -> f32 {
-    let perm = permutation();
-    let (fx, fy, fz) = (p.x.floor(), p.y.floor(), p.z.floor());
-    let (x, y, z) = (p.x - fx, p.y - fy, p.z - fz);
-    let (xi, yi, zi) = ((fx as i64 & 255) as usize, (fy as i64 & 255) as usize, (fz as i64 & 255) as usize);
-    let fade = |t: f32| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-    let (u, v, w) = (fade(x), fade(y), fade(z));
-    let lerp = |t: f32, a: f32, b: f32| a + t * (b - a);
-    let a = perm[xi] as usize + yi;
-    let (aa, ab) = (perm[a] as usize + zi, perm[a + 1] as usize + zi);
-    let b = perm[xi + 1] as usize + yi;
-    let (ba, bb) = (perm[b] as usize + zi, perm[b + 1] as usize + zi);
-    lerp(
-        w,
-        lerp(
-            v,
-            lerp(u, grad(perm[aa], x, y, z), grad(perm[ba], x - 1.0, y, z)),
-            lerp(u, grad(perm[ab], x, y - 1.0, z), grad(perm[bb], x - 1.0, y - 1.0, z)),
-        ),
-        lerp(
-            v,
-            lerp(u, grad(perm[aa + 1], x, y, z - 1.0), grad(perm[ba + 1], x - 1.0, y, z - 1.0)),
-            lerp(u, grad(perm[ab + 1], x, y - 1.0, z - 1.0), grad(perm[bb + 1], x - 1.0, y - 1.0, z - 1.0)),
-        ),
-    )
-}
-
-/// Fractional Brownian motion, normalized so most values fall in [-0.5, 0.5].
-fn fbm(p: Vec3, octaves: u32) -> f32 {
-    let (mut sum, mut amp, mut norm, mut q) = (0.0, 1.0, 0.0, p);
-    for _ in 0..octaves.max(1) {
-        sum += amp * perlin(q);
-        norm += amp;
-        amp *= 0.5;
-        q = q * 2.0 + Vec3::splat(17.17);
+/// Blend weights (|n|^sharpness, normalized) and the three planar UVs of a point.
+fn triplanar(c: &TexCtx, sharpness: f32) -> ([f32; 3], [[f32; 2]; 3]) {
+    let n = c.n.abs();
+    let mut w =
+        if n == Vec3::ZERO { [1.0; 3] } else { [n.x.powf(sharpness), n.y.powf(sharpness), n.z.powf(sharpness)] };
+    let sum = w[0] + w[1] + w[2];
+    for v in &mut w {
+        *v /= sum;
     }
-    sum / norm
-}
-
-fn turbulence_fn(p: Vec3, octaves: u32) -> f32 {
-    let (mut sum, mut amp, mut norm, mut q) = (0.0, 1.0, 0.0, p);
-    for _ in 0..octaves.max(1) {
-        sum += amp * perlin(q).abs();
-        norm += amp;
-        amp *= 0.5;
-        q = q * 2.0 + Vec3::splat(17.17);
-    }
-    sum / norm
+    let p = c.p;
+    (w, [[p.z, p.y], [p.x, p.z], [p.x, p.y]])
 }
 
 #[cfg(test)]
@@ -463,18 +472,43 @@ mod tests {
         assert!((px[3] - 128.0 / 255.0).abs() < 1e-6);
     }
 
+    /// Triplanar projection picks the plane facing the normal and blends at 45 degrees.
     #[test]
-    fn noise_is_bounded_and_varies() {
-        let mut lo = f32::MAX;
-        let mut hi = f32::MIN;
-        for i in 0..2000 {
-            let p = Vec3::new(i as f32 * 0.137, i as f32 * 0.071, i as f32 * 0.029);
-            let n = perlin(p);
-            lo = lo.min(n);
-            hi = hi.max(n);
-        }
-        assert!(lo > -1.1 && hi < 1.1 && hi - lo > 0.8, "{lo} {hi}");
-        // Zero at lattice points.
-        assert_eq!(perlin(Vec3::new(3.0, 4.0, 5.0)), 0.0);
+    fn triplanar_follows_the_normal() {
+        // 2x1: left texel black, right white; u = 0.25 / 0.75 picks them.
+        let t = Texture::Triplanar {
+            tex: Box::new(Texture::Image(Box::new(tex(vec![0, 255], 2, 1, 1, Wrap::Repeat)))),
+            sharpness: 4.0,
+        };
+        let p = Vec3::new(0.25, 0.5, 0.75);
+        let at = |n: Vec3| t.eval_f(&TexCtx { p, n, ..TexCtx::default() });
+        assert!(at(Vec3::new(1.0, 0.0, 0.0)) > 0.99, "x plane: u = p.z = 0.75");
+        assert!(at(Vec3::new(0.0, -1.0, 0.0)) < 0.01, "y plane: u = p.x = 0.25");
+        assert!(at(Vec3::Z) < 0.01, "z plane: u = p.x");
+        assert!((at(Vec3::new(1.0, 0.0, 1.0).normalize()) - 0.5).abs() < 1e-3);
+    }
+
+    /// Solid patterns between constants have gradients; others fall back (None).
+    #[test]
+    fn solid_gradients() {
+        use crate::noise::FractalKind;
+        let noise = |world| Texture::Noise {
+            low: Box::new(Texture::Const(Vec3::splat(0.2))),
+            high: Box::new(Texture::Const(Vec3::splat(0.6))),
+            fractal: Fractal { scale: 2.0, ..Fractal::new(FractalKind::Fbm) },
+            pattern: Pattern::Fractal,
+            world,
+        };
+        let t = noise(true);
+        let c = TexCtx { p: Vec3::new(0.31, 0.77, -0.4), ..TexCtx::default() };
+        let (v, g) = t.eval_grad(&c).unwrap();
+        assert!((v - t.eval_f(&c)).abs() < 1e-6);
+        let h = 1e-3;
+        let fd = (t.eval_f(&TexCtx { p: c.p + Vec3::new(h, 0.0, 0.0), ..c })
+            - t.eval_f(&TexCtx { p: c.p - Vec3::new(h, 0.0, 0.0), ..c }))
+            / (2.0 * h);
+        assert!((fd - g.x).abs() < 0.01 * (1.0 + fd.abs()), "{fd} vs {}", g.x);
+        assert!(noise(false).eval_grad(&c).is_none(), "uv-space patterns have no solid gradient");
+        assert!(Texture::Scaled(Box::new(noise(true)), Vec3::splat(2.0)).eval_grad(&c).is_some());
     }
 }

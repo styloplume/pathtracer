@@ -137,24 +137,35 @@ blits and Wayland; `_NET_WM_PID` and an application icon; triangle vertices stor
 cheaper camera-ray and light-sample generation (Sobol scrambling and light-BVH sampling dominate on simple scenes);
 profiling with hardware counters (`perf` needs `kernel.perf_event_paranoid` lowered in WSL).
 
-## M8 — Procedural & implicit geometry
+## M8 — Procedural & implicit geometry ✅
 
 References: Perlin & Hoffert, *Hypertexture* (SIGGRAPH 1989); Hart, *Sphere Tracing: A Geometric Method for the
 Antialiased Ray Tracing of Implicit Surfaces* (The Visual Computer, 1996); Hart, Sandin & Kauffman, *Ray Tracing
 Deterministic 3-D Fractals* (SIGGRAPH 1989).
 
-- [ ] 3D noise with analytic gradients; Musgrave multifractals (ridged, hybrid, heterogeneous terrain) and domain warping
-- [ ] Fractal bump mapping from the solid-noise gradient (no UVs needed), octaves clamped by the ray footprint against aliasing
-- [ ] `Implicit` shape: sphere tracing inside a bounding box in the BVH, with Lipschitz bounds for safe steps, normals from
-  the field gradient, and robust hit epsilon / spawn offsets for f32
-- [ ] Distance fields: SDF primitives and smooth CSG (union / intersection / difference, blends)
-- [ ] Hypertexture: soft object density × noise / turbulence shaped by `bias` / `gain` (eroded, cavity-filled solids)
-  - [ ] as a surface: a level set of the density, sphere-traced through `Implicit`
-  - [ ] as a volume: the density as a heterogeneous medium (reuses the M6 media code)
-- [ ] Deterministic 3D fractals: quaternion Julia sets (3D slice of 4D, unbounding-sphere distance estimator, `c` /
+- [x] 3D noise with analytic gradients (written once, generic over f32 and a dual number); Musgrave multifractals
+  (ridged, hybrid, heterogeneous terrain), domain warping, marble and wood
+- [x] Fractal bump mapping from the solid-noise gradient (no UVs needed), octaves clamped by the ray footprint against
+  aliasing: pixel ray cones follow each path (widened at glossy / diffuse bounces); dropped octaves are replaced by
+  their mean
+- [x] `Implicit` shape: sphere tracing inside a bounding box in the BVH, with Lipschitz bounds for safe steps (exact for
+  distance fields, estimated by sampling for displaced fields), overshoots bisected, normals from the field gradient
+  (analytic Jacobian for Julia sets), and rays leaving a surface take their side from the gradient (no self-hits or
+  tunnelling in f32)
+- [x] Distance fields: SDF primitives (sphere, box, torus, cylinder, capsule), smooth CSG (union / intersection /
+  difference, polynomial blends), round, shell and noise displacement; non-uniform scales as safe bounds
+- [x] Hypertexture: soft object density × noise / turbulence shaped by `bias` / `gain` (eroded, cavity-filled solids)
+  - [x] as a surface: a level set of the density, sphere-traced through `Implicit`
+  - [x] as a volume: the density as a heterogeneous medium (reuses the M6 media code; sampling clipped to its bounds)
+- [x] Deterministic 3D fractals: quaternion Julia sets (3D slice of 4D, unbounding-sphere distance estimator, `c` /
   iterations / slice plane parameters); then Mandelbulb and Menger sponge as further estimators
-- [ ] Solid (world / object space) texturing for surfaces without UVs; example scenes and regression references for each
+- [x] Solid (world / object space) texturing for surfaces without UVs (fractals, marble, wood, triplanar image
+  projection); example scenes (`implicit`, `fractals`, `hypertexture`) and regression references for each
 
+Possible follow-ups: footprint-scaled hit tolerance for fractals (Hart's antialiased cone tracing) instead of a fixed
+`epsilon`; analytic gradients for distance fields and Mandelbulb normals; finding more than the first crossing (alpha
+masks on implicit surfaces); light sampling for emissive implicit surfaces; a 4D slice that rotates over the shutter;
+Lipschitz bounds per region (local steps in calm areas of displaced fields); ray differentials for image textures.
 ---
 
 Ideas not yet placed: network/distributed rendering, GPU backend, animation sequences,

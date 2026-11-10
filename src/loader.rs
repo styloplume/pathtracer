@@ -2,6 +2,7 @@
 
 mod include;
 mod objects;
+mod procedural;
 
 use crate::camera::{CameraDesc, Pose, Projection};
 use crate::environment::{EnvSource, Environment};
@@ -14,13 +15,14 @@ use crate::material::{METAL_PRESETS, Material, MaterialKind, MetalFresnel, Princ
 use crate::math::{PI, Vec3};
 use crate::medium::{Density, Field, Medium, MediumInterface, load_vol};
 use crate::mtl::{self, MtlMap, MtlMaterial};
+use crate::noise::FractalKind;
 use crate::output::{Aov, Format, OutputSettings};
 use crate::sampler::{SAMPLER_NAMES, SamplerKind};
 use crate::scene::{Geometry, InstanceDesc, RenderSettings, Scene};
 use crate::shapes::Shape;
 use crate::sky::{SUN_RADIUS, Sky};
 use crate::spectrum::blackbody_rgb;
-use crate::texture::{Channel, ImageTex, TexImage, Texture, Wrap};
+use crate::texture::{Channel, ImageTex, Pattern, TexImage, Texture, Wrap};
 use crate::toml::{Table, Value};
 use include::dir_of;
 use std::collections::HashMap;
@@ -664,7 +666,17 @@ impl Builder {
                         };
                         let scale = uv_pair(t, "scale", [1.0; 2], ctx)?;
                         let offset = uv_pair(t, "offset", [0.0; 2], ctx)?;
-                        self.image_texture(&dir.join(file), kind, t, scale, offset, wrap, ctx)?
+                        let img = self.image_texture(&dir.join(file), kind, t, scale, offset, wrap, ctx)?;
+                        match str_opt(t, "projection", ctx)? {
+                            None | Some("uv") => img,
+                            // Planar projections of the texture-space position, for surfaces
+                            // without UVs; `scale` repeats per scene unit.
+                            Some("triplanar") => Texture::Triplanar {
+                                tex: Box::new(img),
+                                sharpness: f32_or(t, "sharpness", 4.0, ctx)?.max(0.0),
+                            },
+                            Some(s) => return Err(format!("{ctx}: unknown projection '{s}' (uv, triplanar)")),
+                        }
                     }
                     "checker" | "checkerboard" => Texture::Checker {
                         even: Box::new(self.tex_or(t, &["even", "color1"], Vec3::splat(0.8), kind, ctx, dir)?),
@@ -672,18 +684,28 @@ impl Builder {
                         scale: f32_or(t, "scale", 8.0, ctx)?,
                         world: space(t, false, ctx)?,
                     },
-                    "noise" | "fbm" | "turbulence" => Texture::Noise {
-                        low: Box::new(self.tex_or(t, &["low", "color1"], Vec3::ZERO, kind, ctx, dir)?),
-                        high: Box::new(self.tex_or(t, &["high", "color2"], Vec3::ONE, kind, ctx, dir)?),
-                        scale: f32_or(t, "scale", 4.0, ctx)?,
-                        octaves: u32_or(t, "octaves", 5, ctx)?.clamp(1, 16),
-                        turbulence: ty == "turbulence" || bool_or(t, "turbulence", false, ctx)?,
-                        world: space(t, true, ctx)?,
-                    },
+                    "noise" | "fbm" | "turbulence" | "ridged" | "hybrid" | "terrain" | "hetero_terrain" | "marble"
+                    | "wood" => {
+                        let (fractal_kind, pattern) = match ty {
+                            "marble" => (FractalKind::Fbm, Pattern::Marble { amount: f32_or(t, "amount", 4.0, ctx)? }),
+                            "wood" => (FractalKind::Fbm, Pattern::Wood { amount: f32_or(t, "amount", 0.5, ctx)? }),
+                            _ if bool_or(t, "turbulence", false, ctx)? => (FractalKind::Turbulence, Pattern::Fractal),
+                            _ => (FractalKind::parse(ty).unwrap_or(FractalKind::Fbm), Pattern::Fractal),
+                        };
+                        Texture::Noise {
+                            low: Box::new(self.tex_or(t, &["low", "color1"], Vec3::ZERO, kind, ctx, dir)?),
+                            high: Box::new(self.tex_or(t, &["high", "color2"], Vec3::ONE, kind, ctx, dir)?),
+                            fractal: procedural::fractal(t, fractal_kind, 4.0, ctx)?,
+                            pattern,
+                            world: space(t, true, ctx)?,
+                        }
+                    }
+                    "hypertexture" => Texture::Hyper(Arc::new(procedural::hypertexture(t, ctx)?)),
                     "" => return Err(format!("{ctx}: texture table needs 'file' or 'type'")),
                     other => {
                         return Err(format!(
-                            "{ctx}: unknown texture type '{other}' (image, checker, noise, turbulence)"
+                            "{ctx}: unknown texture type '{other}' (image, checker, noise, turbulence, ridged, \
+                             hybrid, terrain, marble, wood, hypertexture)"
                         ));
                     }
                 };

@@ -165,12 +165,23 @@ impl Material {
                 (f.t, f.b)
             }
         };
-        if let Some((tex, scale)) = &self.bump {
+        if let Some((tex, scale)) = &self.bump
+            && let Some((_, g)) = tex.eval_grad(c)
+        {
+            // Solid bump (Perlin 1985): displacing the surface by `scale` h(p) along n tilts
+            // the normal by the surface part of the height gradient. No UVs needed.
+            let g = si.grad_to_world(g) * *scale;
+            let nb = n - (g - n * n.dot(g));
+            let len = nb.length();
+            if len > 0.0 && len.is_finite() {
+                n = nb * (1.0 / len);
+            }
+        } else if let Some((tex, scale)) = &self.bump {
             let (dpdu, dpdv) = tangents(n);
             let d = tex.du();
             let h = tex.eval_f(c);
             let at = |du: f32, dv: f32| {
-                let cc = TexCtx { uv: [c.uv[0] + du, c.uv[1] + dv], p: c.p + si.dpdu * du + si.dpdv * dv };
+                let cc = TexCtx { uv: [c.uv[0] + du, c.uv[1] + dv], p: c.p + si.dpdu * du + si.dpdv * dv, ..*c };
                 tex.eval_f(&cc)
             };
             let (hu, hv) = (at(d, 0.0), at(0.0, d));

@@ -176,6 +176,7 @@ struct Origin {
 fn bench_scene(scene: &Scene, name: String, load: Duration, w: usize, h: usize, min_time: Duration) -> Row {
     let threads = crate::renderer::thread_count(scene);
     let camera = Camera::new(&scene.camera, w as f32 / h as f32);
+    let cone = camera.cone(h);
     let kind = scene.settings.sampler;
     let seed = scene.settings.seed;
     let sampler = |x: usize, y: usize, pass: u32| Sampler::new(kind, x as u32, y as u32, w as u32, pass, seed);
@@ -235,7 +236,7 @@ fn bench_scene(scene: &Scene, name: String, load: Duration, w: usize, h: usize, 
     let paths = measure(threads, h, min_time, |y, pass| {
         for x in 0..w {
             if let Some((ray, mut s)) = camera_ray(x, y, pass) {
-                std::hint::black_box(crate::integrator::radiance(scene, ray, &mut s, None));
+                std::hint::black_box(crate::integrator::radiance(scene, ray, cone, &mut s, None));
             }
         }
         w as u64

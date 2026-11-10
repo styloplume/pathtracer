@@ -8,6 +8,7 @@
 //! instances of their own geometry group.
 
 use super::include::dir_of;
+use super::procedural;
 use super::{Builder, TexKind, bool_or, direction, f32_or, str_opt, u32_or, vec3_or, vec3_req};
 use crate::geometry::{NO_NORMALS, NO_UVS, Triangle};
 use crate::gltf::{self, AlphaMode, Gltf, GltfImage, GltfMaterial};
@@ -20,8 +21,10 @@ use crate::shapes::{Shape, ShapeKind};
 use crate::texture::{Channel, ImageTex, Texture};
 use crate::toml::{Table, Value};
 use std::path::Path;
+use std::sync::Arc;
 
-const OBJECT_TYPES: &str = "sphere, disk, cylinder, box, quad, triangle, mesh, instance";
+const OBJECT_TYPES: &str =
+    "sphere, disk, cylinder, box, quad, triangle, mesh, instance, sdf, hypertexture, julia, mandelbulb, menger";
 
 fn parse_trs(t: &Table, ctx: &str) -> Result<Trs, String> {
     let trs = Trs {
@@ -279,6 +282,17 @@ impl Builder {
                     self.push_mesh(&data, xf, &group_mat, smooth);
                 }
             }
+            "sdf" | "implicit" | "hypertexture" | "julia" | "quaternion_julia" | "mandelbulb" | "menger" => {
+                let im = procedural::implicit(t, ty, ctx)?;
+                let material = mat.unwrap_or_else(|| self.default_material());
+                if self.materials[material as usize].is_emissive() {
+                    eprintln!(
+                        "warning: {ctx}: implicit surfaces are not sampled as lights (they only add light \
+                         when hit by chance: expect noise)"
+                    );
+                }
+                self.add_shape(ShapeKind::Implicit(Arc::new(im)), material, xf, ctx)?;
+            }
             other => return Err(format!("{ctx}: unknown object type '{other}' ({OBJECT_TYPES})")),
         }
         Ok(())
@@ -293,6 +307,11 @@ impl Builder {
                 let g = self.new_group();
                 self.instances.push(InstanceDesc { group: g, xf: InstanceXf::Static(*xf) });
                 (kind, g)
+            }
+            // Inside prototypes an implicit surface takes the transform into its field.
+            None if let ShapeKind::Implicit(im) = &kind => {
+                let moved = im.transformed(xf).map_err(|e| format!("{ctx}: {e}"))?;
+                (ShapeKind::Implicit(Arc::new(moved)), self.group)
             }
             None => {
                 return Err(format!(

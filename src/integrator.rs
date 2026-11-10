@@ -7,6 +7,7 @@
 //! inside subsurface-scattering objects they random-walk until they reach the surface
 //! again, where they leave through a diffuse exit lobe.
 
+use crate::camera::RayCone;
 use crate::guiding::{BSDF_FRACTION, Guide};
 use crate::material::{Bsdf, BsdfSample, Lobe};
 use crate::math::{Frame, Ray, Vec3, offset_origin};
@@ -35,17 +36,17 @@ fn exp3(v: Vec3) -> Vec3 {
     Vec3::new(v.x.exp(), v.y.exp(), v.z.exp())
 }
 
-/// Estimates the radiance arriving along `ray`. With a guide, surface directions are
-/// sampled from the BSDF / guide mixture, and (while it trains) the path's incident
-/// radiance is recorded into it.
-pub fn radiance(scene: &Scene, ray: Ray, s: &mut Sampler, guide: Option<&Guide>) -> PathSample {
+/// Estimates the radiance arriving along `ray`, the centre of a pixel's ray `cone`. With a
+/// guide, surface directions are sampled from the BSDF / guide mixture, and (while it
+/// trains) the path's incident radiance is recorded into it.
+pub fn radiance(scene: &Scene, ray: Ray, cone: RayCone, s: &mut Sampler, guide: Option<&Guide>) -> PathSample {
     if scene.settings.spectral {
         let mut wl = Wavelengths::sample(s.get1d());
-        let (l, mut out) = trace(scene, ray, s, &mut wl, guide);
+        let (l, mut out) = trace(scene, ray, cone, s, &mut wl, guide);
         out.radiance = wl.to_rgb(l);
         out
     } else {
-        let (l, mut out) = trace(scene, ray, s, &mut Rgb, guide);
+        let (l, mut out) = trace(scene, ray, cone, s, &mut Rgb, guide);
         out.radiance = l;
         out
     }
@@ -55,6 +56,8 @@ pub fn radiance(scene: &Scene, ray: Ray, s: &mut Sampler, guide: Option<&Guide>)
 const MAX_CROSSINGS: u32 = 256;
 /// Path vertices whose incident radiance is recorded for guiding.
 const MAX_RECORDS: usize = 32;
+/// Ray-cone spread (radians per unit distance) after a diffuse bounce or medium scattering.
+const MAX_SPREAD: f32 = 1.0;
 
 #[derive(Clone, Copy, Default)]
 struct Record {
@@ -101,6 +104,7 @@ struct Prev {
 fn trace<Ch: Channels>(
     scene: &Scene,
     mut ray: Ray,
+    mut cone: RayCone,
     s: &mut Sampler,
     ch: &mut Ch,
     guide: Option<&Guide>,
@@ -176,6 +180,7 @@ fn trace<Ch: Channels>(
                 }
                 let (wi, pdf) = sample_hg(ray.d, g, s.get2d());
                 prev = Prev { pdf, delta: false, p, n: Vec3::ZERO };
+                cone = RayCone { width: cone.width_at(t), spread: MAX_SPREAD };
                 ray = Ray::new(p, wi, ray.time);
                 if !roulette(&mut tp, bounces + volume_events, s) {
                     break;
@@ -230,7 +235,8 @@ fn trace<Ch: Channels>(
             first_hit = false;
             out.depth = hit.t;
         }
-        let ctx = si.tex_ctx();
+        let footprint = cone.width_at(hit.t);
+        let ctx = si.tex_ctx(footprint);
 
         // Beer–Lambert: a segment that reaches an absorbing dielectric from its back
         // side travelled through the interior.
@@ -352,6 +358,12 @@ fn trace<Ch: Channels>(
             rec.n += 1;
         }
         prev = Prev { pdf: bs.pdf, delta: bs.delta, p: si.p, n: ns };
+        // Glossy and diffuse bounces widen the cone roughly by the lobe's angular size
+        // (a lobe of solid angle 1 / pdf); mirrors and glass keep it (curvature ignored).
+        cone.width = footprint;
+        if !bs.delta {
+            cone.spread = cone.spread.max(bs.pdf.max(1e-6).recip().sqrt().min(MAX_SPREAD));
+        }
 
         // Crossing the surface changes the medium; entering a subsurface object starts a walk.
         if in_object {
@@ -460,7 +472,8 @@ mod tests {
             let mut s = Sampler::new(crate::sampler::SamplerKind::Sobol, i % 61, i / 61, 61, i, 3);
             let (u1, u2) = s.get2d();
             let o = Vec3::new(u1 * 1.6 - 0.8, u2 * 1.6 - 0.8, 4.0);
-            sum += radiance(scene, Ray::new(o, Vec3::new(0.0, 0.0, -1.0), 0.0), &mut s, None).radiance;
+            sum +=
+                radiance(scene, Ray::new(o, Vec3::new(0.0, 0.0, -1.0), 0.0), RayCone::default(), &mut s, None).radiance;
         }
         sum * (1.0 / n as f32)
     }
@@ -503,7 +516,13 @@ mod tests {
         let m = Medium { sigma_a: Vec3::new(0.2, 0.7, 1.5), sigma_s: Vec3::ZERO, g: 0.0, density: None };
         let scene = furnace(MaterialKind::Interface, vec![m], false);
         let mut s = Sampler::new(crate::sampler::SamplerKind::Sobol, 0, 0, 1, 0, 1);
-        let l = radiance(&scene, Ray::new(Vec3::new(0.0, 0.0, 4.0), Vec3::new(0.0, 0.0, -1.0), 0.0), &mut s, None);
+        let l = radiance(
+            &scene,
+            Ray::new(Vec3::new(0.0, 0.0, 4.0), Vec3::new(0.0, 0.0, -1.0), 0.0),
+            RayCone::default(),
+            &mut s,
+            None,
+        );
         let expect = Vec3::new((-0.4f32).exp(), (-1.4f32).exp(), (-3.0f32).exp());
         assert!((l.radiance - expect).abs().max_elem() < 1e-3, "{:?} vs {expect:?}", l.radiance);
     }

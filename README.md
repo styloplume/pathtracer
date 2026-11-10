@@ -62,10 +62,11 @@ exposure and tonemap changes are kept unless that part of the file changed.
   - `plastic`: energy-conserving diffuse base under a smooth or rough dielectric coat;
   - `principled`: base color, metallic, roughness, specular / IOR, transmission, clearcoat, sheen;
   - `light`: area emitter, optionally textured, one- or two-sided.
-  - Every material takes `normal_map` (tangent space), `bump` (height texture) and `alpha` (cut-out / stochastic coverage).
-- **Textures:** any color or scalar parameter can be a constant, an image (bilinear / nearest, repeat / clamp / mirror, UV scale / offset, sRGB or linear, channel select), a checker or Perlin noise / turbulence (UV or world space). Texture coordinates come from OBJ `vt`, PLY `u v` / `s t`, quads (0..1) and spheres (latitude-longitude).
+  - Every material takes `normal_map` (tangent space), `bump` (height texture; solid noise patterns bump by their analytic gradient, without UVs) and `alpha` (cut-out / stochastic coverage).
+- **Textures:** any color or scalar parameter can be a constant, an image (bilinear / nearest, repeat / clamp / mirror, UV scale / offset, sRGB or linear, channel select, or triplanar projection for surfaces without UVs), a checker, or a solid noise pattern: fBm, turbulence, Musgrave's ridged / hybrid multifractals and heterogeneous terrain, domain warping, marble and wood (`scenes/implicit.toml`). Noise has analytic gradients; its octaves fade out where they would be finer than a pixel (the footprint follows each path as a ray cone), so distant surfaces stay smooth instead of aliasing. Texture coordinates come from OBJ `vt`, PLY `u v` / `s t`, quads (0..1) and spheres (latitude-longitude).
 - **Image loaders** (own code): PNG (all color types and bit depths, palette, tRNS, Adam7), baseline JPEG (any chroma subsampling, restart markers), TGA (raw / RLE), PPM / PGM, PFM, Radiance HDR.
 - **Geometry:** analytic spheres, disks / annuli, cylinders (open or capped) and oriented boxes, all usable as area lights; quads, triangles and meshes with watertight ray/triangle intersection (Woop et al.). Every object takes `translate` / `rotate` / `scale`.
+- **Implicit surfaces** (sphere tracing, Hart 1996): signed distance field trees (sphere, box, torus, cylinder, capsule; union / intersection / difference with smooth blends; round, shell, noise displacement), hypertextures (Perlin & Hoffert: noise-eroded soft objects, as surfaces or as the density of a medium, `scenes/hypertexture.toml`) and deterministic fractals: quaternion Julia sets with a configurable 4D slice, the Mandelbulb and the Menger sponge (`scenes/fractals.toml`). Steps are bounded by each field's Lipschitz constant (estimated by sampling for displaced and hypertextured fields); overshoots are caught by the sign change and bisected, and rays leaving a surface take their side from the gradient, so f32 precision gives neither holes nor self-intersections.
 - **Acceleration:** two-level BVH. Each geometry group has a 4-wide BVH (binned SAH, built in parallel, children's bounds stored as structure-of-arrays so one node visit tests four boxes); a top-level BVH holds the instances.
 - **Instancing:** `[prototypes.NAME]` defines geometry once; `type = "instance"` objects place it, one at a time or thousands at once with `scatter` (random offsets / rotations / scales). Emitters inside instances are not light-sampled (they only add light when hit).
 - **Motion blur:** objects and instances take `motion = { translate, rotate, scale }` (the transform at the end of the frame; rotations interpolate per axis, so large angles spin), the camera `motion = { position, look_at, up }`; `[camera] shutter = [open, close]`.
@@ -99,14 +100,17 @@ exposure and tonemap changes are kept unless that part of the file changed.
 | `src/output.rs` | output naming, formats, denoised / AOV images |
 | `src/deflate.rs` | DEFLATE / zlib compressor and decompressor |
 | `src/material.rs` | materials, BSDF lobes, Fresnel, energy compensation tables |
-| `src/texture.rs` | image / procedural textures, Perlin noise |
+| `src/texture.rs` | image / procedural / triplanar textures, solid gradients for bump mapping |
+| `src/noise.rs` | Perlin noise with gradients, fractals (fBm, turbulence, multifractals, warping), marble / wood |
+| `src/implicit.rs` | signed distance fields, smooth CSG, hypertexture, fractal distance estimators, sphere tracing |
 | `src/scene.rs` | scene data, geometry groups and instances, two-level traversal, alpha testing, UVs / tangents |
 | `src/bvh.rs` | parallel binned-SAH build, 4-wide BVH and its traversal |
-| `src/geometry.rs`, `src/shapes.rs` | bounds, watertight triangles; spheres, disks, cylinders, boxes |
-| `src/camera.rs` | perspective / orthographic / fisheye / equirect cameras, shutter and camera motion |
+| `src/geometry.rs`, `src/shapes.rs` | bounds, watertight triangles; spheres, disks, cylinders, boxes, implicit surfaces |
+| `src/camera.rs` | perspective / orthographic / fisheye / equirect cameras, shutter and camera motion, pixel ray cones |
 | `src/loader.rs` | TOML → scene: sections, materials, textures, MTL → material mapping |
 | `src/loader/objects.rs` | objects, transforms, motion, prototypes / instances, mesh and glTF import |
 | `src/loader/include.rs` | scene includes |
+| `src/loader/procedural.rs` | noise fractal parameters, SDF trees, hypertextures, fractal objects |
 | `src/imageio.rs`, `src/jpeg.rs` | image decoders |
 | `src/gltf.rs`, `src/json.rs` | glTF 2.0 reader and its JSON parser |
 | `src/toml.rs`, `src/mesh.rs`, `src/mtl.rs`, `src/image.rs` | parsers / writers (mesh.rs: OBJ, PLY, STL) |
@@ -151,7 +155,9 @@ See `scenes/cornell.toml` for an annotated scene file, `scenes/materials.toml` f
 for image-based lighting, `scenes/dispersion.toml` for spectral rendering, `scenes/shapes.toml` for analytic shapes,
 glTF / STL import, motion blur and camera models, and `scenes/instancing.toml` for prototypes, instances and
 `scatter` (56 000 instances), `scenes/media.toml` for participating media, `scenes/subsurface.toml` for subsurface
-scattering and `scenes/guiding.toml` for path guiding. `scenes/lib/materials.toml` is a material library to `include`.
+scattering, `scenes/guiding.toml` for path guiding, `scenes/implicit.toml` for distance fields, solid textures and
+fractal bump mapping, `scenes/fractals.toml` for 3D fractals and `scenes/hypertexture.toml` for hypertextures.
+`scenes/lib/materials.toml` is a material library to `include`.
 
 Note: the glass `tint` parameter was replaced by Beer–Lambert absorption (`color` = transmittance after
 `distance` scene units); loading a scene that still uses `tint` reports this. `[background] type = "sky"` used to be

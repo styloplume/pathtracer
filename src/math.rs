@@ -329,6 +329,11 @@ impl Transform {
     pub fn normal(&self, n: Vec3) -> Vec3 {
         self.normal_m.mul_vec(n).normalize()
     }
+    /// Transforms a gradient (a covector): by the inverse transpose, not normalized.
+    #[inline]
+    pub fn covector(&self, g: Vec3) -> Vec3 {
+        self.normal_m.mul_vec(g)
+    }
     #[inline]
     pub fn inv_point(&self, p: Vec3) -> Vec3 {
         self.inv.mul_vec(p - self.t)

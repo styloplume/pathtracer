@@ -139,7 +139,7 @@ Participating media, referenced by materials' `interior` / `exterior` keys.
 | `scale` | 1 | multiplies the coefficients |
 | `g` | 0 | Henyey–Greenstein anisotropy, in (−1, 1) (positive = forward scattering) |
 | `grid` | — | heterogeneous: a Mitsuba `.vol` voxel grid (float32 or uint8) scaling the density; `min` / `max` override its bounds |
-| `field` | — | heterogeneous: a world-space procedural texture scaling the density (`noise`, `turbulence`, or `checker` with `space = "world"`) |
+| `field` | — | heterogeneous: a world-space procedural texture scaling the density (a noise fractal, `hypertexture`, or `checker` with `space = "world"`); a hypertexture field also limits free-flight sampling to its bounds |
 
 ## [materials.NAME]
 
@@ -162,7 +162,7 @@ Keys every material accepts:
 | Key | Meaning |
 |---|---|
 | `normal_map` | tangent-space normal map texture (linear by default); `normal_strength` (1) scales it |
-| `bump` | height texture; `bump_scale` (0.01) is the height of value 1 in scene units |
+| `bump` | height texture; `bump_scale` (0.01) is the height of value 1 in scene units. Solid patterns between constant `low` / `high` (noise fractals, `marble`, `wood` in world space) tilt the normal by their analytic gradient and need no UVs; other textures use finite differences in UV |
 | `alpha` | coverage texture: 0 = cut out, fractions are resolved stochastically (also in shadows); uses the image's alpha channel if it has one |
 | `interior` (alias `medium`), `exterior` | names of media inside / outside closed surfaces (not for `subsurface`, which has its own) |
 
@@ -178,9 +178,34 @@ Wherever a parameter above is marked *texture*, it can be:
 |---|---|
 | `image` (default if `file` is given) | `file`; `wrap`: `repeat` (default), `clamp`, `mirror`; `scale`, `offset`: UV transform (`[u, v]` or a number); `filter`: `bilinear` (default) or `nearest`; `colorspace`: `srgb` or `linear` (default: sRGB for colors, linear for scalars, normal maps and alpha); `channel`: `r`, `g`, `b`, `a`, `luminance` (for scalar parameters; default: gray, or luminance of RGB) |
 | `checker` | `even` / `color1` (0.8), `odd` / `color2` (0.2): textures; `scale` (8: squares per UV unit or per scene unit); `space`: `uv` (default) or `world` |
-| `noise` (alias `fbm`), `turbulence` | `low` / `color1` (0), `high` / `color2` (1): textures blended by Perlin fBm; `scale` (4); `octaves` (5, 1–16); `turbulence` (true for `type = "turbulence"`); `space`: `world` (default) or `uv` |
+| `noise` (alias `fbm`), `turbulence`, `ridged`, `hybrid`, `terrain` | `low` / `color1` (0), `high` / `color2` (1): textures blended by a noise fractal (see below); `turbulence` (true: turbulence for `type = "noise"`); `space`: `world` (default) or `uv` |
+| `marble` | as the fractals; veins across x, bent by turbulence `amount` (4) |
+| `wood` | as the fractals; rings around the y axis, `scale` per unit, wobbled by fBm `amount` (0.5) |
+| `hypertexture` | the density of a hypertexture (see [Implicit surfaces](#implicit-surfaces)), in [0, 1]; for media fields |
 
 Any texture table also takes `multiplier` (alias `multiply`): a number or color it is multiplied by.
+
+Images can also be projected onto surfaces without UVs: `projection = "triplanar"` maps the texture-space position
+(object space for instances, world space otherwise) along the three axes, blended by the normal with `sharpness` (4);
+`scale` then repeats the image per scene unit.
+
+**Noise fractals** are sums of Perlin noise octaves, normalized to roughly [0, 1]. Keys (also of `noise = { ... }`
+tables in implicit surfaces):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `scale` | 4 | frequency of the first octave (per scene unit) |
+| `octaves` | 5 | number of octaves (1–16, may be fractional) |
+| `lacunarity` | 2 | frequency ratio of successive octaves |
+| `gain` or `h` | per type | amplitude ratio of successive octaves, or the fractal increment H (gain = lacunarity^−H) |
+| `offset` | per type | Musgrave's offset (`ridged` 1, `hybrid` 0.7, `terrain` 0.3) |
+| `sharpness` | 2 | `ridged`: how strongly a ridge suppresses detail on the next octave |
+| `warp` | 0 | domain warping: the position is displaced by fBm, up to this many first-octave wavelengths |
+
+`fbm` (mean ½) and `turbulence` (sum of |noise|, billowy) use gain 0.5. `ridged` (sharp crests), `hybrid` (smooth valleys,
+rough peaks) and `terrain` (roughness grows with height) are Musgrave's multifractals. World-space fractals are
+antialiased: octaves finer than the pixel's footprint (tracked along the path as a ray cone, widened at glossy and
+diffuse bounces) fade out, replaced by their average.
 
 Image formats: PNG (any color type and bit depth), baseline JPEG, TGA, PPM / PGM, PFM, Radiance HDR. Texture
 coordinates follow the OBJ convention (v = 0 at the bottom of the image).
@@ -207,9 +232,10 @@ Every object has a `type`, an optional `material`, and a transform. The transfor
 | `triangle` | `p0`, `p1`, `p2` |
 | `mesh` (default if `file` is given) | `file`: `.obj`, `.ply`, `.stl`, `.gltf`, `.glb`; `smooth` (true: use the file's vertex normals) |
 | `instance` | `prototype`: name of a `[prototypes.NAME]`; `scatter` (see below). Instances cannot set a material |
+| `sdf` (alias `implicit`), `hypertexture`, `julia`, `mandelbulb`, `menger` | implicit surfaces, see below |
 
-Any of these shapes can be an area light by giving it a `light` material. One exception: emitters inside instances
-and moving objects are not sampled as lights, so they only add light when a path hits them by chance.
+Any of these shapes can be an area light by giving it a `light` material. Exceptions: emitters inside instances and
+moving objects, and implicit surfaces, are not sampled as lights, so they only add light when a path hits them by chance.
 
 **Mesh materials.** The object's `material` wins. Otherwise each material group of the file (OBJ `usemtl`, glTF
 materials) uses the scene material with the same name if there is one, then the file's own material (OBJ `.mtl`
@@ -261,3 +287,69 @@ scatter = { count = 10000, min = [-50, 0, -50], max = [50, 0, 50], rotate = [0, 
 | `seed` | random seed |
 
 `scatter` cannot be combined with `motion`.
+
+### Implicit surfaces
+
+Surfaces defined by a field that is negative inside, found by sphere tracing: a ray steps by the field value divided
+by the field's Lipschitz bound, which cannot cross the surface. They have no UVs (use solid textures, triplanar images
+and solid bump maps), their first crossing only is found (alpha masks cannot reveal a far side), and transforms place
+them as instances, so textures stay in object space. Every implicit object takes:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `epsilon` | 2·10⁻⁵ of the object's size; 2·10⁻⁴ for fractals and noisy fields | hit tolerance in object units; for fractals it sets the detail shown |
+| `lipschitz` | 1 for distance fields and fractals; estimated for displacements and hypertextures | bound of the field's slope; raise it if a surface shows holes or speckles |
+| `max_steps` | 512 (fractals 1024) | marching steps per ray |
+
+**`sdf`**: `sdf = { type = ..., ... }`, a tree of nodes. Every node takes `translate`, `rotate` and `scale` (non-uniform
+scales are allowed; distances then shrink by the smallest scale, which stays a safe bound).
+
+| Node `type` | Keys (defaults) |
+|---|---|
+| `sphere` | `radius` (1) |
+| `box` (alias `cube`) | `size` (1), `round` (0: edge radius) |
+| `torus` | `major` (1), `minor` (0.25); the ring lies in the xz plane |
+| `cylinder` | `radius` (0.5), `height` (1), centred, along y |
+| `capsule` | `a` (`[0, -0.5, 0]`), `b` (`[0, 0.5, 0]`), `radius` (0.25) |
+| `union`, `intersection` | `children = [ ... ]`; `blend` (0): width of the smooth blend between children |
+| `difference` (alias `subtract`) | `children = [base, cut, ...]`: the base minus every cut; `blend` (0) |
+| `round` | `child = { ... }`, `radius` (0.05): inflates the child |
+| `shell` (alias `onion`) | `child`, `thickness` (0.05): a hollow skin |
+| `displace` | `child`, `noise = { type, scale, octaves, ... }` (fbm, scale 4), `amount` (0.1): moves the surface out by `amount` × (noise − ½) |
+
+```toml
+[[objects]]
+type = "sdf"
+material = "marble"
+sdf = { type = "difference", blend = 0.04, children = [
+    { type = "union", blend = 0.15, children = [
+        { type = "box", size = [1.1, 0.7, 1.1], round = 0.08 },
+        { type = "torus", major = 0.62, minor = 0.12 },
+    ] },
+    { type = "sphere", radius = 0.45, translate = [0, 0.45, 0] },
+] }
+```
+
+**`hypertexture`** (Perlin & Hoffert): the density of a soft object, `D0` = ½ − sdf / `softness` (1 inside, 0
+outside, a ramp of width `softness` across the surface), is perturbed by noise and shaped:
+density = gain(bias(clamp(D0 + `amount` × (noise − ½)))). The surface is where the density reaches `level`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `shape` | unit sphere | the soft object: an SDF node as above |
+| `softness` | 0.3 | width of the density ramp, in scene units |
+| `noise` | turbulence, scale 3, 6 octaves | noise fractal table |
+| `amount` | 0.6 | noise strength |
+| `bias`, `gain` | 0.5, 0.5 | Perlin's bias (where ½ goes) and gain (S-curve contrast), in (0, 1); 0.5 = unchanged |
+| `level` | 0.5 | density of the surface, in (0, 1) |
+
+The same keys make a `type = "hypertexture"` texture, whose density can fill a medium (`field = { type =
+"hypertexture", ... }`; its shape is in world space, inside the medium's boundary object).
+
+**Fractals** use distance estimators and are as detailed as `epsilon`:
+
+| `type` | Keys (defaults) |
+|---|---|
+| `julia` (alias `quaternion_julia`) | `c` (`[-1, 0.2, 0, 0]`): the quaternion constant of q → q² + c as `[real, i, j, k]`; `iterations` (12); the 3D slice of 4D space is the hyperplane q · `slice_normal` = `slice`, with `slice_normal` (`[0, 0, 0, 1]`, the k axis: scene x, y, z are then real, i, j) and `slice` (0) |
+| `mandelbulb` | `power` (8, 2–32), `iterations` (10) |
+| `menger` | `iterations` (4, at most 10): a Menger sponge filling [-1, 1]³ |

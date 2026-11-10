@@ -102,6 +102,22 @@ struct Basis {
     ortho_h: f32,
 }
 
+/// A cone of rays around a path segment: `width` at its start, growing by `spread` per
+/// unit distance. Its width at a hit is the pixel's footprint there, which solid
+/// textures use to drop detail finer than a pixel.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RayCone {
+    pub width: f32,
+    pub spread: f32,
+}
+
+impl RayCone {
+    #[inline]
+    pub fn width_at(self, t: f32) -> f32 {
+        self.width + self.spread * t
+    }
+}
+
 pub struct Camera {
     projection: Projection,
     aspect: f32,
@@ -161,6 +177,18 @@ impl Camera {
             b.u * (dx * self.lens_radius) + b.v * (dy * self.lens_radius)
         } else {
             Vec3::ZERO
+        }
+    }
+
+    /// The cone a pixel's rays fill, for an image `h` pixels high (ray cones, Akenine-Möller
+    /// et al. 2019): width at the camera and spread angle per unit distance.
+    pub fn cone(&self, h: usize) -> RayCone {
+        let h = h.max(1) as f32;
+        match self.projection {
+            // Perspective: tan(fov / 2); fisheye: fov / 2 in radians.
+            Projection::Perspective | Projection::Fisheye => RayCone { width: 0.0, spread: 2.0 * self.half_fov / h },
+            Projection::Orthographic => RayCone { width: self.basis.ortho_h / h, spread: 0.0 },
+            Projection::Equirect => RayCone { width: 0.0, spread: PI / h },
         }
     }
 

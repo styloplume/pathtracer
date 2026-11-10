@@ -165,15 +165,21 @@ impl Density {
     fn eval(&self, p: Vec3) -> f32 {
         match &self.field {
             Field::Grid(g) => g.eval(p),
-            Field::Texture(t) => t.eval_f(&TexCtx { uv: [0.0, 0.0], p }).clamp(0.0, self.max),
+            Field::Texture(t) => t.eval_f(&TexCtx { p, ..TexCtx::default() }).clamp(0.0, self.max),
         }
     }
 
     /// The part of the ray segment [0, `t_max`) where the density can be non-zero.
     fn clip(&self, ray: &Ray, t_max: f32) -> Option<(f32, f32)> {
-        let Field::Grid(g) = &self.field else { return Some((0.0, t_max)) };
+        let bounds = match &self.field {
+            Field::Grid(g) => g.bounds,
+            Field::Texture(t) => match t.support() {
+                Some(b) => b,
+                None => return Some((0.0, t_max)),
+            },
+        };
         let inv = ray.d.recip();
-        let (a, b) = ((g.bounds.min - ray.o) * inv, (g.bounds.max - ray.o) * inv);
+        let (a, b) = ((bounds.min - ray.o) * inv, (bounds.max - ray.o) * inv);
         let (near, far) = (a.min(b), a.max(b));
         let t0 = near.x.max(near.y).max(near.z).max(0.0);
         let t1 = far.x.min(far.y).min(far.z).min(t_max);

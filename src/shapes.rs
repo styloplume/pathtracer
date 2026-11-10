@@ -1,14 +1,19 @@
-//! Analytic shapes: spheres, disks (and annuli), open cylinders and oriented boxes.
+//! Analytic shapes: spheres, disks (and annuli), open cylinders and oriented boxes, and
+//! implicit surfaces (see `implicit.rs`).
 //!
-//! Every shape provides bounds, ray intersection (both crossings, for alpha masks),
-//! surface parameterization (UV and its position derivatives) and uniform area
-//! sampling, so any of them can be an area light.
+//! Every analytic shape provides bounds, ray intersection (both crossings, for alpha
+//! masks), surface parameterization (UV and its position derivatives) and uniform area
+//! sampling, so any of them can be an area light. Implicit surfaces have no UVs and no
+//! known area: they are found by sphere tracing (first crossing only) and are not sampled
+//! as lights.
 
 use crate::geometry::{Aabb, sphere_roots};
+use crate::implicit::Implicit;
 use crate::math::{Frame, PI, Transform, Vec3};
 use crate::sampling::uniform_sphere;
+use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum ShapeKind {
     Sphere {
         center: Vec3,
@@ -34,9 +39,11 @@ pub enum ShapeKind {
         frame: Frame,
         half: Vec3,
     },
+    /// A sphere-traced implicit surface (in its own object space).
+    Implicit(Arc<Implicit>),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Shape {
     pub kind: ShapeKind,
     pub material: u32,
@@ -113,15 +120,18 @@ impl ShapeKind {
                 let e = frame.t.abs() * half.x + frame.b.abs() * half.y + frame.n.abs() * half.z;
                 Aabb { min: center - e, max: center + e }
             }
+            ShapeKind::Implicit(ref im) => im.bounds(),
         }
     }
 
+    /// Surface area (0 for implicit surfaces, whose area is unknown).
     pub fn area(&self) -> f32 {
         match *self {
             ShapeKind::Sphere { radius, .. } => 4.0 * PI * radius * radius,
             ShapeKind::Disk { radius, inner, .. } => PI * (radius * radius - inner * inner),
             ShapeKind::Cylinder { radius, height, .. } => 2.0 * PI * radius * height,
             ShapeKind::Box { half: h, .. } => 8.0 * (h.x * h.y + h.y * h.z + h.z * h.x),
+            ShapeKind::Implicit(_) => 0.0,
         }
     }
 
@@ -180,6 +190,7 @@ impl ShapeKind {
                 }
                 (near <= far).then_some((near, far))
             }
+            ShapeKind::Implicit(ref im) => im.intersect(o, d, f32::INFINITY).map(|t| (t, f32::INFINITY)),
         }
     }
 
@@ -246,6 +257,10 @@ impl ShapeKind {
                     dpdv: axis(&frame, j) * (2.0 * half[j]),
                 }
             }
+            // No parameterization: zero tangents make the caller build a frame around n.
+            ShapeKind::Implicit(ref im) => {
+                SurfacePoint { p, n: im.normal(p), uv: [0.0, 0.0], dpdu: Vec3::ZERO, dpdv: Vec3::ZERO }
+            }
         }
     }
 
@@ -285,6 +300,8 @@ impl ShapeKind {
                     + axis(&frame, j) * ((2.0 * u2 - 1.0) * h[j]);
                 (p, n)
             }
+            // Never a light (zero area); a point for completeness.
+            ShapeKind::Implicit(ref im) => (im.bounds().centroid(), Vec3::Z),
         }
     }
 
@@ -293,7 +310,7 @@ impl ShapeKind {
     /// rotation and per-axis scale applied before it).
     pub fn transformed(&self, xf: &Transform) -> Option<ShapeKind> {
         if xf.is_identity() {
-            return Some(*self);
+            return Some(self.clone());
         }
         let rotate_frame = |f: &Frame, s: f32| {
             let v = |a: Vec3| xf.vector(a) * (1.0 / s);
@@ -329,6 +346,8 @@ impl ShapeKind {
                 let f = rotate_frame(&frame, s);
                 Some(ShapeKind::Cylinder { base: xf.point(base), frame: f, radius: radius * s, height: height * s })
             }
+            // Placed as instances, so that solid textures stay in object space.
+            ShapeKind::Implicit(_) => None,
         }
     }
 }
@@ -427,7 +446,7 @@ mod tests {
             }
         }
         let squash = Trs { scale: Vec3::new(1.0, 2.0, 1.0), ..Trs::IDENTITY }.transform().unwrap();
-        let sphere = shapes()[0];
+        let sphere = shapes()[0].clone();
         assert!(sphere.transformed(&squash).is_none());
         assert!(shapes()[3].transformed(&squash).is_none(), "a rotated box under a skewing scale is no box");
     }

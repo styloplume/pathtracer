@@ -1,0 +1,4 @@
+# Limits for the block differences of the 'implicit' regression test: 2x the difference
+# between two renders with different seeds (128 spp). Written by PT_BLESS=1.
+rms = 1.000
+max = 4.000

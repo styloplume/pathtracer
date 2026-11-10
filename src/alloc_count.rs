@@ -104,7 +104,7 @@ mod tests {
                                 let (u1, u2) = s.get2d();
                                 let st = ((x as f32 + u1) / w as f32, (y as f32 + u2) / h as f32);
                                 if let Some(ray) = camera.ray(st.0, st.1, &mut s) {
-                                    std::hint::black_box(radiance(&scene, ray, &mut s, g));
+                                    std::hint::black_box(radiance(&scene, ray, camera.cone(h as usize), &mut s, g));
                                 }
                             }
                         }

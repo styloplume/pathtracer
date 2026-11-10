@@ -19,7 +19,7 @@ use crate::medium::Medium;
 use crate::output::OutputSettings;
 use crate::rng::hash64;
 use crate::sampler::SamplerKind;
-use crate::shapes::Shape;
+use crate::shapes::{Shape, ShapeKind};
 use crate::texture::TexCtx;
 use std::time::{Duration, Instant};
 
@@ -116,11 +116,28 @@ pub struct Interaction {
     /// Position seen by textures: object space for instances, so world-space patterns
     /// stick to the object as it moves.
     pub p_tex: Vec3,
+    /// Geometric normal in texture space (triplanar projection).
+    pub n_tex: Vec3,
+    /// Texture space to world space (the instance transform); None if they coincide.
+    pub tex_xf: Option<Transform>,
 }
 
 impl Interaction {
-    pub fn tex_ctx(&self) -> TexCtx {
-        TexCtx { uv: self.uv, p: self.p_tex }
+    /// Texture lookup context; `footprint` is the world-space width of the pixel's
+    /// footprint here (0 = unknown).
+    pub fn tex_ctx(&self, footprint: f32) -> TexCtx {
+        let footprint = match &self.tex_xf {
+            // Object-space units per world unit, roughly (a cube root of the volume scale).
+            Some(xf) => footprint / xf.m.determinant().abs().cbrt().max(1e-12),
+            None => footprint,
+        };
+        TexCtx { uv: self.uv, p: self.p_tex, n: self.n_tex, footprint }
+    }
+
+    /// A texture-space gradient as a world-space vector (gradients transform with the
+    /// inverse transpose, like normals).
+    pub fn grad_to_world(&self, g: Vec3) -> Vec3 {
+        self.tex_xf.as_ref().map_or(g, |xf| xf.covector(g))
     }
 }
 
@@ -392,6 +409,10 @@ impl Scene {
             let h = Hit { t, prim, inst, b1, b2 };
             return (!self.any_alpha || self.alpha_pass(&h, o, d)).then_some(h);
         };
+        if let ShapeKind::Implicit(im) = &s.kind {
+            let h = Hit { t: im.intersect(o, d, t_max)?, prim, inst, b1: 0.0, b2: 0.0 };
+            return (!self.any_alpha || self.alpha_pass(&h, o, d)).then_some(h);
+        }
         let (t0, t1) = s.kind.hits(o, d)?;
         // With alpha masks the far side may be visible through a cut-out near side.
         for t in [t0, t1] {
@@ -411,7 +432,7 @@ impl Scene {
         let Some(tex) = &self.materials[self.prim_material(h.prim) as usize].alpha else { return true };
         let p = o + d * h.t;
         let uv = self.hit_uv(h, p);
-        let a = tex.eval_f(&TexCtx { uv, p });
+        let a = tex.eval_f(&TexCtx { uv, p, ..TexCtx::default() });
         if a >= 1.0 {
             return true;
         }
@@ -542,6 +563,8 @@ impl Scene {
                 dpdv: sp.dpdv,
                 material: s.material,
                 p_tex: sp.p,
+                n_tex: sp.n,
+                tex_xf: None,
             };
         }
         let tri = &self.triangles[hit.prim as usize];
@@ -562,7 +585,7 @@ impl Scene {
         } else {
             (Vec3::ZERO, Vec3::ZERO)
         };
-        Interaction { p, ng, ns, uv, dpdu, dpdv, material: tri.material, p_tex: p }
+        Interaction { p, ng, ns, uv, dpdu, dpdv, material: tri.material, p_tex: p, n_tex: ng, tex_xf: None }
     }
 
     pub fn interaction(&self, ray: &Ray, hit: &Hit) -> Interaction {
@@ -580,6 +603,7 @@ impl Scene {
                 }
                 si.dpdu = xf.vector(si.dpdu);
                 si.dpdv = xf.vector(si.dpdv);
+                si.tex_xf = Some(*xf);
                 si
             }
         };
@@ -596,7 +620,6 @@ impl Scene {
 mod tests {
     use super::*;
     use crate::geometry::{NO_NORMALS, NO_UVS};
-    use crate::shapes::ShapeKind;
 
     fn unit_tri_geometry() -> Geometry {
         Geometry {
