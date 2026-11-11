@@ -1309,7 +1309,9 @@ mod tests {
     /// every key and type named in the first column of a table there is in the schema.
     #[test]
     fn docs_match_the_schema() {
-        let text = std::fs::read_to_string(crate::repo_root().join("docs/scene-format.md")).unwrap();
+        // Git may check the doc out with CRLF endings (core.autocrlf on Windows runners).
+        let text =
+            std::fs::read_to_string(crate::repo_root().join("docs/scene-format.md")).unwrap().replace("\r\n", "\n");
         let section = |heading: &str| -> String {
             let start = text.find(&format!("\n## {heading}\n")).unwrap_or_else(|| panic!("no section '{heading}'"));
             let body = &text[start + 1..];
