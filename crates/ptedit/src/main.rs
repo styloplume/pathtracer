@@ -12,6 +12,9 @@ mod files;
 mod gizmo;
 mod inspector;
 mod library;
+mod modeling;
+#[cfg(test)]
+mod modeling_tests;
 mod outliner;
 mod overlay;
 mod paint;
@@ -40,11 +43,12 @@ usage: ptedit <scene.toml>           open the scene in the editor
        ptedit --check <scene.toml>   print the scene's outline and problems, without a window
        ptedit --snapshot <scene.toml> <out.png> [--size WxH] [--quad] [--shading MODE]
                      [--select N]... [--frames N] [--ui] [--theme dark|light] [--scale S]
-                     [--rendered SPP]
+                     [--rendered SPP] [--edit N]
                                      draw the viewport (with --ui: the whole editor) into a
                                      PNG, without a window (MODE: wire, solid, shaded,
                                      wiresolid; N: object index; --rendered: path trace the
-                                     perspective view to SPP samples per pixel)
+                                     perspective view to SPP samples per pixel; --edit: object
+                                     N in edit mode, everything selected)
 
 the editor's keys (F1 shows them in the window):";
 
@@ -88,6 +92,7 @@ fn snapshot(path: &Path, out: &Path, opts: &[&str]) -> Result<(), String> {
     let (mut w, mut h, mut frames) = (1280usize, 720usize, 1usize);
     let (mut with_ui, mut theme, mut scale) = (false, None, 1.0f32);
     let mut rendered: Option<u32> = None;
+    let mut edit: Option<u32> = None;
     let mut it = opts.iter();
     while let Some(&o) = it.next() {
         let mut value = || it.next().copied().ok_or_else(|| format!("{o} needs a value"));
@@ -109,12 +114,13 @@ fn snapshot(path: &Path, out: &Path, opts: &[&str]) -> Result<(), String> {
                 ws.rendered = true;
             }
             "--ui" => with_ui = true,
+            "--edit" => edit = Some(value()?.parse().map_err(|_| "--edit takes an object index")?),
             "--theme" => theme = Some(value()?.to_owned()),
             "--scale" => scale = value()?.parse().map_err(|_| "--scale takes a number")?,
             _ => return Err(format!("unknown option '{o}'")),
         }
     }
-    if with_ui {
+    if with_ui || edit.is_some() {
         let mut s = Settings { quad: ws.quad, ..Settings::default() };
         if let Some(t) = theme {
             s.theme = t;
@@ -122,8 +128,21 @@ fn snapshot(path: &Path, out: &Path, opts: &[&str]) -> Result<(), String> {
         let quad = ws.quad;
         let mut ed = Editor::new(ws, s, None, scale);
         ed.ws.quad = quad;
-        if let Some(i) = ed.ws.sel.objects.iter().position(|&x| x) {
+        if let Some(i) = edit {
+            ed.ws.sel.clear();
+            ed.ws.sel.set_id(i + 1, true);
+            ed.enter_edit();
+            if ed.ws.edit.is_none() {
+                return Err(ed.status.clone());
+            }
+            ed.edit_select_all();
+        } else if let Some(i) = ed.ws.sel.objects.iter().position(|&x| x) {
             ed.inspect = Some(Target::Item(Kind::Object, i));
+        }
+        if !with_ui {
+            let px = ed.ws.compose(w, h);
+            return pt_core::image::write_png(out, w, h, &pt_core::image::packed_to_rgb(&px))
+                .map_err(|e| format!("cannot write '{}': {e}", out.display()));
         }
         // Twice: popups learn their sizes, the status bar the viewport's statistics.
         let (wi, hi) = (w as i32, h as i32);

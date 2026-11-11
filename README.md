@@ -97,10 +97,28 @@ Scene editing:
   has unsaved changes there); changed meshes and textures reload the scene. `F5` opens the scene in the tracer's
   window, which reloads it whenever the editor saves.
 
+Polygon modeling (`Tab` on a selected object; the Mesh menu replaces Add):
+
+- Shapes (sphere, box, cylinder, disk, quad, triangle) and OBJ / PLY / STL mesh files become an editable polygon mesh
+  (the `pt-geom` crate: half-edge connectivity, texture coordinates per corner, creases, material groups). `Tab`
+  again writes it next to the scene as a new PLY file (OBJ when it has texture coordinates or material groups) and
+  points the object at it, as one undoable edit; the old file stays, so undo brings the old geometry back.
+- `1` / `2` / `3` select vertices, edges or faces (selected faces are tinted). Click (`Shift` adds, `Ctrl` toggles),
+  drag a rectangle (only what is in sight), double-click an edge for its loop (`Ctrl`: its ring; faces: the face
+  loop), `Ctrl+A` all, `Ctrl+Plus` / `Ctrl+Minus` grow / shrink, `Ctrl+L` linked. The gizmos move, rotate and scale
+  the selection, with snapping (also onto the mesh's own vertices) and proportional editing (`Shift+O`; the wheel
+  sets the radius while dragging).
+- `Ctrl+E` extrude (faces as a region, or edges; `X` / `Y` / `Z` along an axis), `I` inset, `Ctrl+B` bevel edges
+  (`Ctrl+Shift+B` vertices): they follow the mouse, take typed values, and end with a click or `Enter` (`Esc`
+  cancels). `Ctrl+R` loop cut (point at an edge; the wheel adds cuts), `K` knife (drag a line: it cuts the selected
+  faces, or all, under it). The Mesh menu adds bridge (two edge loops, or two face regions), merge, weld by
+  distance, dissolve, fill hole, mirror, flip normals, triangulate and creases. `Delete` deletes, `Ctrl+Delete`
+  dissolves; `Ctrl+Z` / `Ctrl+Y` undo and redo inside edit mode.
+
 Clicking in the viewport picks through the tracer's BVH. `ptedit --snapshot scene.toml out.png [--size WxH] [--quad]
 [--shading wire|solid|shaded|wiresolid] [--select N] [--frames N] [--rendered SPP]` draws the viewport into a PNG
-without a window and prints the frame time (`--rendered`: path traced to SPP samples per pixel); `--ui [--theme
-dark|light] [--scale S]` draws the whole editor window instead. Planned work is in
+without a window and prints the frame time (`--rendered`: path traced to SPP samples per pixel); `--edit N` shows
+object N in edit mode; `--ui [--theme dark|light] [--scale S]` draws the whole editor window instead. Planned work is in
 [`EDITOR_ROADMAP.md`](EDITOR_ROADMAP.md).
 
 | Input | Action |
@@ -174,6 +192,8 @@ dark|light] [--scale S]` draws the whole editor window instead. Planned work is 
 | `crates/ptedit/src/xform.rs` | placements and how moves, rotations and scales are written back in each item's own keys |
 | `crates/ptedit/src/gizmo.rs` | transform gizmos and handles: drawing and hit testing |
 | `crates/ptedit/src/tools.rs` | gizmo and handle drags, snapping, typed values, click-to-focus, render region, camera locked to the view |
+| `crates/ptedit/src/modeling.rs` | edit mode: objects as meshes, element selection and picking, operations following the mouse, loop cut, knife, writing the mesh file |
+| `crates/pt-geom/src/` | the modeling kernel: half-edge meshes (`mesh.rs`), selection helpers (`select.rs`), operations (`ops.rs`), primitives, ear clipping, PLY / OBJ writers and conversion from and to the tracer's meshes (`io.rs`) |
 | `crates/ptedit/src/ptview.rs` | the path-traced view: the progressive renderer on its own thread, restarted on changes |
 | `crates/ptedit/src/library.rs` | the Materials tab and its path-traced previews, image thumbnails (a worker thread) |
 | `crates/ptedit/src/watch.rs` | hot reload: files changed by other programs |
@@ -237,7 +257,7 @@ The toolchain is pinned in `rust-toolchain.toml`; rustup installs it with `rustf
 | `cargo run --release -p pathtracer -- bench` | performance: build times, rays/s, paths/s |
 
 The repository is a Cargo workspace: `pt-core` (library: scene model and format, loaders, BVH, renderer,
-platform layer) and the `pathtracer` and `ptedit` binaries. Lint policy is in the root `Cargo.toml` under
+platform layer), `pt-geom` (library: the modeling kernel) and the `pathtracer` and `ptedit` binaries. Lint policy is in the root `Cargo.toml` under
 `[workspace.lints]`: `clippy::pedantic` plus a few restriction lints, with
 numeric-cast lints turned off as noise for renderer code. `unsafe` is denied everywhere except
 the platform backends in `crates/pt-core/src/platform/` and the test-only counting allocator, and every `unsafe` block needs a

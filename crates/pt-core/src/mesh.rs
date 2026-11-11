@@ -12,6 +12,12 @@ pub struct MeshData {
     pub groups: Vec<String>,
     /// Material libraries referenced by the file (`mtllib` in OBJ), as written.
     pub mtllibs: Vec<String>,
+    /// Corner count of each face as written, in order: a face of n corners became n - 2
+    /// consecutive triangles fanned from its first corner. Empty when the loader does not
+    /// keep faces (every triangle is a face then).
+    pub polygons: Vec<u32>,
+    /// Edge creases (`element edge` with `vertex1`, `vertex2`, `crease` in PLY).
+    pub creases: Vec<(u32, u32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -129,6 +135,7 @@ pub fn load_obj(text: &str) -> Result<MeshData, String> {
                 if corners.len() < 3 {
                     return Err(err("face with fewer than 3 vertices".into()));
                 }
+                m.polygons.push(corners.len() as u32);
                 let all_normals = corners.iter().all(|c| c.1.is_some());
                 let all_uvs = corners.iter().all(|c| c.2.is_some());
                 for i in 1..corners.len() - 1 {
@@ -326,6 +333,7 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
         let tv = any(&["v", "t", "texture_v", "texture_t"]);
         let face_prop = find("vertex_indices").or_else(|| find("vertex_index"));
         let is_vertex = el.name == "vertex";
+        let crease = (el.name == "edge").then(|| (find("vertex1"), find("vertex2"), find("crease")));
         if is_vertex {
             has_normals = nx.is_some() && ny.is_some() && nz.is_some();
             has_uvs = tu.is_some() && tv.is_some();
@@ -345,6 +353,7 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
                             if n < 3 {
                                 continue;
                             }
+                            m.polygons.push(n as u32);
                             for k in 1..n - 1 {
                                 let v = [list[0] as u32, list[k] as u32, list[k + 1] as u32];
                                 m.triangles.push(MeshTriangle { v, n: None, uv: None, group: 0 });
@@ -352,6 +361,9 @@ pub fn load_ply(data: &[u8]) -> Result<MeshData, String> {
                         }
                     }
                 }
+            }
+            if let Some((Some(a), Some(b), Some(c))) = crease {
+                m.creases.push((vals[a] as u32, vals[b] as u32, vals[c] as f32));
             }
             if is_vertex {
                 let g = |i: Option<usize>| i.map_or(0.0, |i| vals[i] as f32);

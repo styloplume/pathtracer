@@ -27,6 +27,9 @@ pub struct Mesh {
     /// Unique edges, for wireframes.
     pub edges: Vec<[u32; 2]>,
     pub bounds: Aabb,
+    /// Triangles drawn highlighted (the selected faces of a mesh being edited); empty for
+    /// none.
+    pub tint: Vec<bool>,
 }
 
 impl Default for Mesh {
@@ -37,11 +40,41 @@ impl Default for Mesh {
             triangles: Vec::new(),
             edges: Vec::new(),
             bounds: Aabb::EMPTY,
+            tint: Vec::new(),
         }
     }
 }
 
 impl Mesh {
+    /// A polygon mesh being edited: its faces as triangles in `material`, its polygon
+    /// edges (no diagonals) for wireframes, and the faces `tinted` highlighted.
+    pub fn of_polygons(m: &pt_geom::Mesh, material: u32, tinted: &[bool]) -> Mesh {
+        let mut d = Mesh { positions: m.positions.clone(), ..Mesh::default() };
+        for (hs, f) in m.triangles() {
+            d.tri(hs.map(|h| m.origin(h)), false);
+            if let Some(t) = d.triangles.last_mut() {
+                t.material = material;
+            }
+            d.tint.push(tinted.get(f as usize).copied().unwrap_or(false));
+        }
+        if !d.tint.iter().any(|&t| t) {
+            d.tint.clear();
+        }
+        d.edges = m.edges().into_iter().map(|(a, b)| [a, b]).collect();
+        d.set_positions(&m.positions);
+        d
+    }
+
+    /// New positions for the same triangles (a mesh being edited, moved).
+    pub fn set_positions(&mut self, p: &[Vec3]) {
+        self.positions.clear();
+        self.positions.extend_from_slice(p);
+        self.bounds = Aabb::EMPTY;
+        for &q in &self.positions {
+            self.bounds.grow_point(q);
+        }
+    }
+
     fn finish(mut self) -> Mesh {
         let mut seen = HashSet::new();
         for t in &self.triangles {
@@ -115,6 +148,8 @@ pub struct Display {
     pub bounds: Aabb,
     /// Tessellations of the canonical shapes, per level of detail.
     canonical: HashMap<(Canonical, usize), u32>,
+    /// The mesh standing in for an object being edited: object and `meshes` index.
+    edit: Option<(usize, u32)>,
 }
 
 fn linear_to_srgb(c: f32) -> f32 {
@@ -166,6 +201,7 @@ impl Display {
             object_bounds: vec![Aabb::EMPTY; scene.provenance.objects.len()],
             bounds: Aabb::EMPTY,
             canonical: HashMap::new(),
+            edit: None,
         };
         d.meshes.push(cube_mesh());
         if d.colors.is_empty() {
@@ -255,6 +291,56 @@ impl Display {
         self.bounds = Aabb::EMPTY;
         for d in &self.draws {
             self.bounds.grow(&d.bounds);
+        }
+    }
+
+    /// The material object `o` is drawn with (its first part's).
+    pub fn material_of(&self, o: usize) -> u32 {
+        self.draws.iter().find(|d| d.object == Some(o as u32)).map_or(0, |d| d.material)
+    }
+
+    /// Shows `mesh` placed by `xf` in place of what object `o` draws (an object being
+    /// edited); called again with the mesh changed.
+    pub fn set_edit_mesh(&mut self, o: usize, mesh: Mesh, xf: Transform) {
+        let material = self.draws.iter().find(|d| d.object == Some(o as u32)).map_or(0, |d| d.material);
+        self.draws.retain(|d| d.object != Some(o as u32));
+        let index = if let Some((_, i)) = self.edit {
+            self.meshes[i as usize] = mesh;
+            i
+        } else {
+            self.meshes.push(mesh);
+            self.meshes.len() as u32 - 1
+        };
+        self.edit = Some((o, index));
+        let bounds = self.meshes[index as usize].bounds.transformed(&xf);
+        self.draws.push(Draw { part: Part::Mesh(index), xf, object: Some(o as u32), material, bounds });
+        self.edit_bounds();
+    }
+
+    /// The mesh being edited moved to positions `p` (the same faces).
+    pub fn move_edit_mesh(&mut self, p: &[Vec3]) {
+        let Some((_, i)) = self.edit else { return };
+        self.meshes[i as usize].set_positions(p);
+        let b = self.meshes[i as usize].bounds;
+        if let Some(d) = self.draws.iter_mut().rev().find(|d| d.part == Part::Mesh(i)) {
+            d.bounds = b.transformed(&d.xf);
+        }
+        self.edit_bounds();
+    }
+
+    /// Bounds again after the mesh being edited changed.
+    fn edit_bounds(&mut self) {
+        let Some((o, _)) = self.edit else { return };
+        let mut ob = Aabb::EMPTY;
+        self.bounds = Aabb::EMPTY;
+        for d in &self.draws {
+            self.bounds.grow(&d.bounds);
+            if d.object == Some(o as u32) {
+                ob.grow(&d.bounds);
+            }
+        }
+        if let Some(b) = self.object_bounds.get_mut(o) {
+            *b = ob;
         }
     }
 

@@ -6,6 +6,7 @@ description = "Scene layout editor for the path tracer"
 
 [dependencies]
 pt-core.workspace = true
+pt-geom.workspace = true
 
 [lints]
 workspace = true

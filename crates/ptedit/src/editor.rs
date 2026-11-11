@@ -9,6 +9,7 @@
 use crate::edit::Add;
 use crate::files::{self, FileDialog, Mode, Outcome};
 use crate::gizmo::{Decor, Tool};
+use crate::modeling::MeshCmd;
 use crate::overlay::{LIGHT_ID, Selection};
 use crate::render::Shading;
 use crate::settings::{self, Settings};
@@ -83,6 +84,13 @@ pub const HELP: &[&str] = &[
     "  Ctrl+C / X / V: copy, cut, paste (also between scenes)     Ctrl+P: make a prototype",
     "  C: look through the camera     Shift+C: lock the camera to the view     Ctrl+F: pick focus",
     "  P: path-traced view     Ctrl+B: draw a render region (Ctrl+Alt+B: clear it)     F5: tracer",
+    "Modeling (Tab: edit the selected object as a mesh, Tab again: write it next to the scene)",
+    "  1 2 3: vertices / edges / faces     click, Shift / Ctrl: select     double-click: loop (Ctrl: ring)",
+    "  Ctrl+A: all     Ctrl+Plus / Minus: grow / shrink     Ctrl+L: linked     Ctrl+Z: undo in edit mode",
+    "  Ctrl+E: extrude (X Y Z: along an axis)     I: inset     Ctrl+B: bevel (Shift: vertices)",
+    "  Ctrl+R: loop cut (wheel: more cuts)     K: knife (drag a line)     Alt+M: merge     Alt+F: fill",
+    "  Delete: delete     Ctrl+Delete: dissolve     Alt+N: flip     Ctrl+T: triangulate     Shift+E: crease",
+    "  Shift+O: proportional editing (wheel while dragging: radius)     the Mesh menu has the rest",
     "Panels",
     "  outliner: click to select, double-click or F2 to rename, drag to reorder,",
     "    drag a material onto an object to assign it, right-click for more",
@@ -140,6 +148,9 @@ pub enum Cmd {
     RenderRegion,
     ClearRegion,
     RenderInTracer,
+    /// Into or out of edit mode.
+    EditMode,
+    Mesh(MeshCmd),
 }
 
 /// Keyboard shortcuts: key, Ctrl, Shift, Alt, command.
@@ -189,10 +200,36 @@ const SHORTCUTS: &[(Key, bool, bool, bool, Cmd)] = &[
     (Key::Char('b'), true, false, false, Cmd::RenderRegion),
     (Key::Char('b'), true, false, true, Cmd::ClearRegion),
     (Key::F(5), false, false, false, Cmd::RenderInTracer),
+    (Key::Tab, false, false, false, Cmd::EditMode),
+];
+
+/// Edit mode's keys, looked at before the others there.
+const EDIT_SHORTCUTS: &[(Key, bool, bool, bool, Cmd)] = &[
+    (Key::Char('1'), false, false, false, Cmd::Mesh(MeshCmd::Mode(pt_geom::Mode::Vertex))),
+    (Key::Char('2'), false, false, false, Cmd::Mesh(MeshCmd::Mode(pt_geom::Mode::Edge))),
+    (Key::Char('3'), false, false, false, Cmd::Mesh(MeshCmd::Mode(pt_geom::Mode::Face))),
+    (Key::Char('e'), true, false, false, Cmd::Mesh(MeshCmd::Extrude)),
+    (Key::Char('i'), false, false, false, Cmd::Mesh(MeshCmd::Inset)),
+    (Key::Char('b'), true, false, false, Cmd::Mesh(MeshCmd::Bevel)),
+    (Key::Char('b'), true, true, false, Cmd::Mesh(MeshCmd::BevelVertices)),
+    (Key::Char('r'), true, false, false, Cmd::Mesh(MeshCmd::LoopCut)),
+    (Key::Char('k'), false, false, false, Cmd::Mesh(MeshCmd::Knife)),
+    (Key::Char('m'), false, false, true, Cmd::Mesh(MeshCmd::Merge)),
+    (Key::Char('f'), false, false, true, Cmd::Mesh(MeshCmd::Fill)),
+    (Key::Char('n'), false, false, true, Cmd::Mesh(MeshCmd::Flip)),
+    (Key::Char('t'), true, false, false, Cmd::Mesh(MeshCmd::Triangulate)),
+    (Key::Char('l'), true, false, false, Cmd::Mesh(MeshCmd::Linked)),
+    (Key::Plus, true, false, false, Cmd::Mesh(MeshCmd::Grow)),
+    (Key::Minus, true, false, false, Cmd::Mesh(MeshCmd::Shrink)),
+    (Key::Delete, true, false, false, Cmd::Mesh(MeshCmd::Dissolve)),
+    (Key::Char('e'), false, true, false, Cmd::Mesh(MeshCmd::Crease)),
+    (Key::Char('o'), false, true, false, Cmd::Mesh(MeshCmd::Proportional)),
 ];
 
 fn shortcut(cmd: Cmd) -> String {
-    let Some(&(key, ctrl, shift, alt, _)) = SHORTCUTS.iter().find(|s| s.4 == cmd) else { return String::new() };
+    let Some(&(key, ctrl, shift, alt, _)) = SHORTCUTS.iter().chain(EDIT_SHORTCUTS).find(|s| s.4 == cmd) else {
+        return String::new();
+    };
     let name = match key {
         Key::Char(c) => c.to_ascii_uppercase().to_string(),
         Key::F(n) => format!("F{n}"),
@@ -200,6 +237,7 @@ fn shortcut(cmd: Cmd) -> String {
         Key::Home => "Home".into(),
         Key::Space => "Space".into(),
         Key::Delete => "Delete".into(),
+        Key::Tab => "Tab".into(),
         other => format!("{other:?}"),
     };
     let mut s = String::new();
@@ -211,8 +249,9 @@ fn shortcut(cmd: Cmd) -> String {
     s + &name
 }
 
-/// The menu bar's menus.
+/// The menu bar's menus (in edit mode Mesh takes the place of Add).
 const MENUS: [&str; 4] = ["File", "Edit", "Add", "View"];
+const EDIT_MENUS: [&str; 4] = ["File", "Edit", "Mesh", "View"];
 
 const FLY_KEYS: [Key; 6] =
     [Key::Char('w'), Key::Char('a'), Key::Char('s'), Key::Char('d'), Key::Char('q'), Key::Char('e')];
@@ -222,11 +261,13 @@ enum DragMode {
     Orbit,
     Pan,
     Look,
-    /// Left button: a click or a selection rectangle, from where it started (window pixels).
+    /// Left button: a click or a selection rectangle, from where it started (window pixels),
+    /// and clicks in a row.
     Select {
         x0: i32,
         y0: i32,
         mods: Modifiers,
+        clicks: u8,
     },
     /// Left button on the gizmo, a handle, or picking a region (`Editor::tool_drag`).
     Tool,
@@ -411,6 +452,17 @@ impl Editor {
     /// the viewport reads) in a `w`x`h` window.
     pub fn frame(&mut self, input: Input, events: &[Event], w: i32, h: i32) {
         self.probes.clear();
+        // Tab moves between fields once one has the focus; otherwise it is edit mode's key.
+        let mut input = input;
+        let mut tab = false;
+        if self.ui.focus == 0
+            && self.dialog.is_none()
+            && !self.ui.modal_open()
+            && let Some(i) = input.keys.iter().position(|&(k, m)| k == Key::Tab && !m.ctrl && !m.alt && !m.shift)
+        {
+            input.keys.remove(i);
+            tab = true;
+        }
         self.ui.begin(input, w, h);
         let rh = self.ui.row_h();
         let screen = Rect::new(0, 0, w, h);
@@ -486,6 +538,9 @@ impl Editor {
         self.viewport_overlay();
         self.add_popup();
         self.dialogs();
+        if tab {
+            self.run(Cmd::EditMode);
+        }
         if !self.tool_keys() {
             self.shortcuts();
         }
@@ -595,20 +650,23 @@ impl Editor {
         let ui = &mut self.ui;
         ui.fill(r, ui.theme.bar);
         ui.fill(Rect::new(r.x, r.bottom() - 1, r.w, 1), ui.theme.separator);
-        let ids: Vec<Id> = MENUS.iter().map(|t| id_of(VIEWPORT, ("menu", *t))).collect();
+        let menus = if self.ws.edit.is_some() { EDIT_MENUS } else { MENUS };
+        let ids: Vec<Id> = menus.iter().map(|t| id_of(VIEWPORT, ("menu", *t))).collect();
         let mut x = r.x + ui.px(4.0);
-        for (k, title) in MENUS.into_iter().enumerate() {
+        for (k, title) in menus.into_iter().enumerate() {
             let w = self.ui.text_w(title) + 2 * self.ui.pad() + self.ui.px(6.0);
             let tr = Rect::new(x, r.y + self.ui.px(2.0), w, r.h - self.ui.px(4.0));
             x += w;
+            self.probe(format!("menu:{title}"), tr);
             let Some(mut f) = self.ui.menu(ids[k], tr, title, &ids) else { continue };
-            match k {
-                0 => self.file_menu(&mut f),
-                1 => self.edit_menu(&mut f),
-                2 => {
+            match title {
+                "File" => self.file_menu(&mut f),
+                "Edit" => self.edit_menu(&mut f),
+                "Add" => {
                     self.add_at = None;
                     self.add_items(&mut f);
                 }
+                "Mesh" => self.mesh_menu(&mut f),
                 _ => self.view_menu(&mut f),
             }
             self.ui.end_popup(f);
@@ -654,10 +712,23 @@ impl Editor {
     }
 
     fn edit_menu(&mut self, f: &mut PopupFrame) {
-        let undo = self.ws.doc.history().undo_label().map(|l| format!("Undo {l}"));
-        let redo = self.ws.doc.history().redo_label().map(|l| format!("Redo {l}"));
+        let (undo, redo) = match &self.ws.edit {
+            Some(e) => (e.undo_label().map(|l| format!("Undo {l}")), e.redo_label().map(|l| format!("Redo {l}"))),
+            None => (
+                self.ws.doc.history().undo_label().map(|l| format!("Undo {l}")),
+                self.ws.doc.history().redo_label().map(|l| format!("Redo {l}")),
+            ),
+        };
         self.item(f, undo.as_deref().unwrap_or("Undo"), Cmd::Undo, undo.is_some());
         self.item(f, redo.as_deref().unwrap_or("Redo"), Cmd::Redo, redo.is_some());
+        self.ui.menu_separator(f);
+        let editing = self.ws.edit.is_some();
+        self.check(f, "Edit Mesh", Cmd::EditMode, editing);
+        if editing {
+            self.item(f, "Select All", Cmd::SelectAll, true);
+            self.item(f, "Clear Selection", Cmd::ClearSelection, true);
+            return;
+        }
         self.ui.menu_separator(f);
         let some = !self.ws.sel.is_empty();
         self.item(f, "Select All", Cmd::SelectAll, true);
@@ -688,6 +759,66 @@ impl Editor {
             }
             self.ui.end_popup(sub);
         }
+    }
+
+    /// Edit mode's operations.
+    fn mesh_menu(&mut self, f: &mut PopupFrame) {
+        let mode = self.ws.edit.as_ref().map_or(pt_geom::Mode::Vertex, |e| e.mode);
+        for (m, label) in
+            [(pt_geom::Mode::Vertex, "Vertices"), (pt_geom::Mode::Edge, "Edges"), (pt_geom::Mode::Face, "Faces")]
+        {
+            self.check(f, label, Cmd::Mesh(MeshCmd::Mode(m)), mode == m);
+        }
+        self.ui.menu_separator(f);
+        let items: [(&str, MeshCmd); 5] = [
+            ("Select Loops", MeshCmd::SelectLoop),
+            ("Select Rings", MeshCmd::SelectRing),
+            ("Grow Selection", MeshCmd::Grow),
+            ("Shrink Selection", MeshCmd::Shrink),
+            ("Select Linked", MeshCmd::Linked),
+        ];
+        for (label, c) in items {
+            self.item(f, label, Cmd::Mesh(c), true);
+        }
+        self.ui.menu_separator(f);
+        let ops: [(&str, MeshCmd); 6] = [
+            ("Extrude", MeshCmd::Extrude),
+            ("Inset", MeshCmd::Inset),
+            ("Bevel", MeshCmd::Bevel),
+            ("Bevel Vertices", MeshCmd::BevelVertices),
+            ("Loop Cut", MeshCmd::LoopCut),
+            ("Knife", MeshCmd::Knife),
+        ];
+        for (label, c) in ops {
+            self.item(f, label, Cmd::Mesh(c), true);
+        }
+        self.ui.menu_separator(f);
+        let more: [(&str, MeshCmd); 7] = [
+            ("Bridge", MeshCmd::Bridge),
+            ("Fill Hole", MeshCmd::Fill),
+            ("Merge at Center", MeshCmd::Merge),
+            ("Weld by Distance", MeshCmd::Weld),
+            ("Dissolve", MeshCmd::Dissolve),
+            ("Delete", MeshCmd::Delete),
+            ("Crease Edges", MeshCmd::Crease),
+        ];
+        for (label, c) in more {
+            self.item(f, label, Cmd::Mesh(c), true);
+        }
+        if let Some(mut sub) = self.ui.submenu(f, "Mirror", true) {
+            for (k, label) in ["Across X", "Across Y", "Across Z"].into_iter().enumerate() {
+                if self.ui.menu_item(&mut sub, label, "", true) {
+                    self.chosen = Some(Cmd::Mesh(MeshCmd::Mirror(k)));
+                }
+            }
+            self.ui.end_popup(sub);
+        }
+        self.item(f, "Flip Normals", Cmd::Mesh(MeshCmd::Flip), true);
+        self.item(f, "Triangulate", Cmd::Mesh(MeshCmd::Triangulate), true);
+        self.ui.menu_separator(f);
+        let prop = self.ws.edit.as_ref().is_some_and(|e| e.proportional);
+        self.check(f, "Proportional Editing", Cmd::Mesh(MeshCmd::Proportional), prop);
+        self.item(f, "Leave Edit Mode", Cmd::EditMode, true);
     }
 
     fn view_menu(&mut self, f: &mut PopupFrame) {
@@ -735,8 +866,18 @@ impl Editor {
         ui.fill(r, ui.theme.bar);
         ui.fill(Rect::new(r.x, r.y, r.w, 1), ui.theme.separator);
         let s = &self.ws.stats;
+        let edit = self.ws.edit.as_ref().map_or_else(String::new, |e| {
+            format!(
+                "editing {}: {} vertices, {} faces, {} mode{} · ",
+                e.label,
+                e.mesh.vertex_count(),
+                e.mesh.face_count(),
+                e.mode.name(),
+                if e.proportional { ", proportional" } else { "" }
+            )
+        });
         let stats = format!(
-            "{} {} · snap {} · {} · {} triangles{} · {:.1} ms",
+            "{edit}{} {} · snap {} · {} · {} triangles{} · {:.1} ms",
             self.tool.name(),
             if self.local_space { "local" } else { "world" },
             self.snap.name(),
@@ -778,7 +919,9 @@ impl Editor {
             }
         }
         if !modal && free(&self.ui) && self.vp.contains(mx, my) && self.ui.input.wheel != 0.0 {
-            if let Some(r) = self.view_at(mx, my) {
+            if self.ws.edit.is_some() && self.edit_wheel(self.ui.input.wheel) {
+                // Loop cuts or the proportional radius.
+            } else if let Some(r) = self.view_at(mx, my) {
                 self.ws.views[r.view].zoom(self.ui.input.wheel);
                 self.view_moved(r.view);
                 self.view_move_done();
@@ -809,11 +952,15 @@ impl Editor {
                     }
                     let Some(view) = self.view_at(x, y) else { continue };
                     self.set_active(view.view);
+                    if self.modal_press(button, x, y) {
+                        continue;
+                    }
+                    let clicks = self.ui.input.clicks;
                     let mode = match button {
                         MouseButton::Left if mods.alt && mods.shift => DragMode::Pan,
                         MouseButton::Left if mods.alt => DragMode::Orbit,
                         MouseButton::Left if self.tool_press(&view, x, y) => DragMode::Tool,
-                        MouseButton::Left => DragMode::Select { x0: x, y0: y, mods },
+                        MouseButton::Left => DragMode::Select { x0: x, y0: y, mods, clicks },
                         MouseButton::Middle if mods.shift => DragMode::Pan,
                         MouseButton::Middle => DragMode::Orbit,
                         MouseButton::Right => DragMode::Look,
@@ -836,7 +983,10 @@ impl Editor {
                         self.ui.active = 0;
                     }
                     match d.mode {
-                        DragMode::Select { x0, y0, mods } => self.select(&d.view, x0, y0, x, y, mods),
+                        DragMode::Select { x0, y0, mods, clicks } if self.ws.edit.is_some() => {
+                            self.edit_select(&d.view, x0, y0, x, y, mods, clicks);
+                        }
+                        DragMode::Select { x0, y0, mods, .. } => self.select(&d.view, x0, y0, x, y, mods),
                         DragMode::Tool => self.tool_release(x, y),
                         DragMode::Look => {
                             self.held.clear();
@@ -846,6 +996,9 @@ impl Editor {
                     }
                     self.vp_dirty = true;
                 }
+                // An operation following the mouse, or the loop cut looking for an edge.
+                Event::MouseMove { x, y, mods }
+                    if self.drag.is_none() && !modal && self.modal_mouse(x, y, mods.ctrl) => {}
                 Event::MouseMove { x, y, mods } => match self.drag {
                     Some(mut d) => {
                         let (dx, dy) = ((x - d.x) as f32, (y - d.y) as f32);
@@ -1039,6 +1192,15 @@ impl Editor {
                 self.ui.pop_clip();
             }
         }
+        if let Some(ToolDrag::Knife(k)) = &self.tool_drag
+            && let Some(r) = k.view
+        {
+            let (ox, oy) = ((self.vp.x + r.x as i32) as f32, (self.vp.y + r.y as i32) as f32);
+            let (a, b) = ((ox + k.from.0, oy + k.from.1), (ox + k.to.0, oy + k.to.1));
+            self.ui.push_clip(self.vp);
+            self.ui.line(a, b, 2.0, 0xff_e0_40);
+            self.ui.pop_clip();
+        }
         if let Some(ToolDrag::Region(r, (x0, y0))) = &self.tool_drag {
             let (ox, oy) = (self.vp.x + r.x as i32, self.vp.y + r.y as i32);
             let (mx, my) = self.ui.input.mouse;
@@ -1104,11 +1266,16 @@ impl Editor {
             if typing && !(mods.ctrl && matches!(key, Key::Char('s' | 'o' | 'q'))) {
                 continue;
             }
-            let found =
-                SHORTCUTS.iter().find(|s| s.0 == key && s.1 == mods.ctrl && s.2 == mods.shift && s.3 == mods.alt);
+            let editing: &[_] = if self.ws.edit.is_some() { EDIT_SHORTCUTS } else { &[] };
+            let found = editing
+                .iter()
+                .chain(SHORTCUTS)
+                .find(|s| s.0 == key && s.1 == mods.ctrl && s.2 == mods.shift && s.3 == mods.alt);
             // Unshifted single keys also work with Shift held (Shift+F keeps framing).
             let found = found.or_else(|| {
-                (!mods.ctrl && !mods.alt).then(|| SHORTCUTS.iter().find(|s| s.0 == key && !s.1 && !s.3)).flatten()
+                (!mods.ctrl && !mods.alt)
+                    .then(|| editing.iter().chain(SHORTCUTS).find(|s| s.0 == key && !s.1 && !s.3))
+                    .flatten()
             });
             if let Some(&(.., cmd)) = found {
                 self.run(cmd);
@@ -1120,7 +1287,32 @@ impl Editor {
     #[expect(clippy::too_many_lines, reason = "one arm per command")]
     pub fn run(&mut self, cmd: Cmd) {
         let v = self.ws.active;
+        if self.ws.edit.is_some() {
+            // Edit mode: selection, undo and deleting work on the mesh; files are written
+            // with the mesh; what works on objects waits.
+            match cmd {
+                Cmd::Undo | Cmd::Redo => return self.edit_undo(cmd == Cmd::Undo),
+                Cmd::SelectAll => return self.edit_select_all(),
+                Cmd::ClearSelection if !self.help => return self.edit_clear(),
+                Cmd::Frame => return self.edit_frame(v),
+                Cmd::Delete => return self.mesh_cmd(MeshCmd::Delete),
+                Cmd::Save | Cmd::SaveAs | Cmd::RenderInTracer => self.leave_edit(),
+                Cmd::Hide
+                | Cmd::ShowAll
+                | Cmd::Duplicate
+                | Cmd::Copy
+                | Cmd::Cut
+                | Cmd::Paste
+                | Cmd::MakePrototype
+                | Cmd::Rename
+                | Cmd::AddMenu
+                | Cmd::Add(_) => return self.notify("that works on objects: Tab leaves edit mode first"),
+                _ => {}
+            }
+        }
         match cmd {
+            Cmd::EditMode => self.toggle_edit(),
+            Cmd::Mesh(c) => self.mesh_cmd(c),
             Cmd::Open => {
                 let dir = self.ws.doc.path().parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
                 self.dialog = Some(Dialog::Files(FileDialog::new(Mode::Open, "Open Scene", &dir, &["toml"])));
@@ -1417,6 +1609,7 @@ impl Editor {
     // ------------------------------------------------------------------ files and dialogs
 
     fn request_quit(&mut self) {
+        self.leave_edit();
         if self.ws.doc.is_dirty() {
             self.dialog = Some(Dialog::Confirm(After::Quit));
         } else {
@@ -1430,6 +1623,7 @@ impl Editor {
     }
 
     fn request_open(&mut self, path: PathBuf) {
+        self.leave_edit();
         if self.ws.doc.is_dirty() {
             self.dialog = Some(Dialog::Confirm(After::Open(path)));
         } else {

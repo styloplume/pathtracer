@@ -54,6 +54,8 @@ impl Shading {
 
 pub const BACKGROUND: u32 = 0x2a_2b_2f;
 const SOLID_GREY: [f32; 3] = [0.78, 0.78, 0.8];
+/// What selected faces of a mesh being edited are mixed with.
+const TINT: [f32; 3] = [1.0, 0.55, 0.15];
 /// Visible triangles beyond which the smallest objects (on screen) become boxes.
 pub const TRIANGLE_BUDGET: usize = 400_000;
 /// Meshes smaller than this many pixels across show as boxes.
@@ -158,20 +160,23 @@ pub fn render(
         let v = &vis[k];
         let d = &display.draws[v.draw as usize];
         let mesh = &display.meshes[v.mesh.expect("only meshes get triangle jobs") as usize];
-        for t in &mesh.triangles[s..end] {
+        for (ti, t) in mesh.triangles[s..end].iter().enumerate() {
             let p = t.v.map(|i| mesh.positions[i as usize]);
             let clip = p.map(|p| apply(&v.map, p));
             if shading == Shading::Rendered {
                 e.tri(clip.map(|p| Vertex { p, c: [0.0; 3] }), v.id, Some(KEY));
                 continue;
             }
-            let base = match shading {
+            let mut base = match shading {
                 Shading::Shaded => {
                     let m = if v.per_tri { t.material } else { d.material };
                     display.colors[m as usize % display.colors.len()]
                 }
                 _ => SOLID_GREY,
             };
+            if mesh.tint.get(s + ti).copied().unwrap_or(false) {
+                base = std::array::from_fn(|k| base[k] * 0.5 + TINT[k] * 0.5);
+            }
             if shading == Shading::Shaded && t.has_normals() {
                 let c = t.n.map(|n| shade(base, v.xf.normal(mesh.normals[n as usize]), light));
                 e.tri(std::array::from_fn(|i| Vertex { p: clip[i], c: c[i] }), v.id, None);

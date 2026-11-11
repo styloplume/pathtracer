@@ -231,7 +231,7 @@ Every object has a `type`, an optional `material`, an optional `name` (a label f
 | `box` (alias `cube`) | `min` and `max`, or `center` (origin) and `size` (1) |
 | `quad` | `origin`, `u`, `v`: the parallelogram origin, origin + u, origin + u + v, origin + v. Its normal is u × v; UVs run from (0, 0) to (1, 1) |
 | `triangle` | `p0`, `p1`, `p2` |
-| `mesh` (default if `file` is given; aliases `gltf`, `stl`) | `file`: `.obj`, `.ply`, `.stl`, `.gltf`, `.glb`; `smooth` (true: use the file's vertex normals) |
+| `mesh` (default if `file` is given; aliases `gltf`, `stl`) | `file`: `.obj`, `.ply`, `.stl`, `.gltf`, `.glb`; `smooth` (true: use the file's vertex normals). Polygons are fanned into triangles; a PLY `edge` element with `vertex1`, `vertex2`, `crease` (what the editor writes) holds edge creases, which the editor keeps (the tracer does not use them yet) |
 | `instance` | `prototype`: name of a `[prototypes.NAME]`; `scatter` (see below). Instances cannot set a material |
 | `sdf` (alias `implicit`), `hypertexture`, `julia`, `mandelbulb`, `menger` | implicit surfaces, see below |
 

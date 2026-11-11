@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pt-core", "crates/pathtracer", "crates/ptedit"]
+members = ["crates/pt-core", "crates/pt-geom", "crates/pathtracer", "crates/ptedit"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ edition = "2024"
 # Intentionally empty: everything is implemented on top of `std`.
 [workspace.dependencies]
 pt-core = { path = "crates/pt-core" }
+pt-geom = { path = "crates/pt-geom" }
 
 # Lints are warnings here so a toolchain bump never breaks a plain `cargo build`;
 # `cargo lint` (see .cargo/config.toml) and the pre-commit hook promote them to errors.

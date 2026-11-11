@@ -40,7 +40,7 @@ crates/
 - [x] Round-trip tests: every `scenes/*.toml` → document → save → reload gives the same scene and the same
   regression render; saving an unedited document leaves the file byte-identical
 - [x] Edits as commands: undo/redo stack, with consecutive edits merged (a slider drag is one undo step)
-- Not yet in E0: `pt-geom` (created with E4, when it has code). New object types and keys are added to the schema
+- Not in E0: `pt-geom` (created with E4, when it had code). New object types and keys are added to the schema
   table; a test fails until `docs/scene-format.md` mentions them.
 - [x] `ptedit` binary skeleton: opens a window through the existing platform layer, loads a scene, and saves it
 
@@ -149,12 +149,30 @@ crates/
 
 ## E4 — Polygon modeling
 
-- [ ] `pt-geom` half-edge mesh with attributes (UVs, creases, material groups); conversion from and to our meshes
-- [ ] Edit mode: vertex / edge / face selection, loops and rings, grow / shrink, select linked
-- [ ] Operations: extrude (along normals / along an axis), inset, bevel (edges and vertices), loop cut, knife,
+- [x] `pt-geom` half-edge mesh with attributes (UVs, creases, material groups); conversion from and to our meshes
+- [x] Edit mode: vertex / edge / face selection, loops and rings, grow / shrink, select linked
+- [x] Operations: extrude (along normals / along an axis), inset, bevel (edges and vertices), loop cut, knife,
   bridge, merge / weld, dissolve, fill hole, mirror, flip normals, triangulate
-- [ ] Proportional (soft) editing; snapping in edit mode
-- [ ] Save as PLY / OBJ next to the scene, referenced by a `mesh` object
+- [x] Proportional (soft) editing; snapping in edit mode
+- [x] Save as PLY / OBJ next to the scene, referenced by a `mesh` object
+- How E4 turned out: `pt-geom` keeps each face's half-edges in one run (next and previous are implicit), twins found
+  by vertex pair, and every vertex's outgoing half-edges in a list, so edges shared by more than two faces and
+  vertices where the surface pinches still work (they act as borders). Operations never change a mesh: they read
+  one and build the next from polygons, which keeps them short; only moving vertices changes positions in place.
+  The loaders now report each face's corner count (`MeshData::polygons`), so quads and n-gons come back from OBJ and
+  PLY files as they were written; PLY files also carry creases as an `edge` element. `Tab` turns the selected object
+  into a mesh in its own space (shapes are tessellated: 24 segments around); the object's draws are replaced by the
+  mesh, with the selected faces tinted and the edges and vertex (or face centre) dots drawn depth-tested over it.
+  Picking finds the nearest element on screen and keeps it if the depth drawn last says it is in sight; faces are
+  picked by casting a ray at their triangles. Extrude moves the region along its mean normal (or an axis); inset uses
+  the same topology with the border moved into the faces; bevel has one segment, its width measured along the
+  edges at the ends and across the faces where two bevelled edges meet, with a polygon capping corners where three or
+  more meet (not at the border). The knife cuts along the plane through the eye and the drawn line, where the cut
+  points fall on the line on screen; loop selection stops at vertices without four edges (a box's corners), the ring
+  goes on. Edit mode has its own undo steps; leaving it writes a new file each time (`name.ply`, `name-2.ply`, ...)
+  rather than overwriting, so undoing the scene edit brings the old geometry back; files no longer used are not
+  deleted. Tab moves between inspector fields only once one has the focus. `ptedit --snapshot ... --edit N` draws
+  object N in edit mode.
 
 ## E5 — Subdivision surfaces
 

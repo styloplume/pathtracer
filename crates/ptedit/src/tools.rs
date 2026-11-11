@@ -10,6 +10,7 @@
 
 use crate::editor::{Editor, Section, Target};
 use crate::gizmo::{self, Decor, Gizmo, Handle, HandleKind, Part, Tool};
+use crate::modeling::{Knife, LoopCut, Modal, Snapshot};
 use crate::overlay::{self, LIGHT_ID};
 use crate::view::{Proj, sphere};
 use crate::workspace::Rect as ViewRect;
@@ -91,6 +92,19 @@ pub struct GizmoDrag {
     merge: String,
     /// Moving in place failed: the scene is loaded again after each change.
     reload: bool,
+    /// In edit mode: the vertices moved instead of the selected items.
+    edit: Option<EditDrag>,
+}
+
+/// Vertices of the mesh being edited moved by a gizmo.
+#[derive(Clone, Debug)]
+pub struct EditDrag {
+    before: Snapshot,
+    /// Positions (object space) when the drag started.
+    base: Vec<Vec3>,
+    /// The vertices that move and how much (proportional editing).
+    weights: Vec<(u32, f32)>,
+    moved: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -112,11 +126,17 @@ pub enum ToolDrag {
     Handle(Box<HandleDrag>),
     /// A render region from this corner (view-local pixels).
     Region(ViewRect, (i32, i32)),
+    /// Edit mode: an extrusion, inset or bevel following the mouse.
+    Modal(Box<Modal>),
+    /// Edit mode: the loop cut, pointing at an edge.
+    LoopCut(LoopCut),
+    /// Edit mode: the knife, ready or drawing its line.
+    Knife(Knife),
 }
 
 /// What the drawn decor depends on: document version, scene version, selection, tool,
-/// axes, inspected item, looking through the camera.
-pub type DecorKey = (u64, u64, overlay::Selection, Tool, bool, Option<Target>, bool);
+/// axes, inspected item, looking through the camera, the mesh being edited.
+pub type DecorKey = (u64, u64, overlay::Selection, Tool, bool, Option<Target>, bool, u64);
 
 /// Spacing of the grid lines a view shows around `at` (the minor lines).
 pub fn grid_step(proj: &Proj, at: Vec3) -> f32 {
@@ -169,6 +189,13 @@ impl Editor {
         if self.tool == Tool::Select {
             return None;
         }
+        if let Some(e) = &self.ws.edit {
+            // The selected vertices, along the world's or the object's axes.
+            let pivot = e.pivot()?;
+            let world = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::Z];
+            let axes = if self.local_space || self.tool == Tool::Scale { e.axes() } else { world };
+            return Some(Gizmo { tool: self.tool, pivot, axes, hot: None, active: None, scale: self.ui.scale });
+        }
         let mut pivots = Vec::new();
         let mut axes = None;
         for (kind, i) in self.selected().into_iter().take(4000) {
@@ -200,6 +227,7 @@ impl Editor {
             self.local_space,
             self.inspect,
             self.ws.through_camera,
+            self.ws.edit.as_ref().map_or(0, |e| e.version + 1),
         );
         if let (Some(k), Some(cached)) = (&self.decor_key, &self.decor_cache)
             && *k == key
@@ -225,6 +253,20 @@ impl Editor {
             g.axes = gd.axes;
             if let Gesture::Move(m) = gd.gesture {
                 g.pivot = gd.pivot + m;
+            }
+        }
+        // The loop cut's preview, and the reach of proportional editing while dragging.
+        d.lines.extend(self.loop_cut_lines());
+        if let (Some(ToolDrag::Gizmo(gd)), Some(e)) = (&self.tool_drag, &self.ws.edit)
+            && e.proportional
+            && gd.edit.is_some()
+        {
+            let c = d.gizmo.map_or(gd.pivot, |g| g.pivot);
+            let r = e.radius;
+            for k in 0..48 {
+                let a = |k: usize| 2.0 * PI * k as f32 / 48.0;
+                let p = |k: usize| c + (Vec3::new(1.0, 0.0, 0.0) * a(k).cos() + Vec3::Z * a(k).sin()) * r;
+                d.lines.push((p(k), p(k + 1), 0x80_80_ff));
             }
         }
         let changed = d.gizmo != self.ws.decor.gizmo
@@ -383,6 +425,9 @@ impl Editor {
     /// region or focus is being picked); returns whether it did.
     pub fn tool_press(&mut self, r: &ViewRect, x: i32, y: i32) -> bool {
         let (lx, ly) = self.local(r, x, y);
+        if self.knife_press(r, lx, ly) {
+            return true;
+        }
         if self.focus_pick {
             self.focus_pick = false;
             self.pick_focus(r, lx, ly);
@@ -423,8 +468,17 @@ impl Editor {
     }
 
     fn start_gizmo(&mut self, r: &ViewRect, part: Part, start: (f32, f32), g: Gizmo) {
+        let edit = self.ws.edit.as_ref().map(|e| EditDrag {
+            before: e.snapshot(g.tool.name()),
+            base: e.mesh.positions.clone(),
+            weights: e.weights(),
+            moved: false,
+        });
         let mut items = Vec::new();
         for (kind, i) in self.selected() {
+            if edit.is_some() {
+                break;
+            }
             let Some((p, table)) = self.placement_of(kind, i) else { continue };
             if !Self::can(&p, g.tool) {
                 continue;
@@ -442,7 +496,7 @@ impl Editor {
                 scattered,
             });
         }
-        if items.is_empty() {
+        if items.is_empty() && edit.as_ref().is_none_or(|e| e.weights.is_empty()) {
             return;
         }
         self.groups += 1;
@@ -467,6 +521,7 @@ impl Editor {
             wrote: false,
             merge: format!("gizmo {}", self.groups),
             reload: false,
+            edit,
         };
         d.start_hit = self.plane_point(&d, start.0, start.1);
         self.tool_drag = Some(ToolDrag::Gizmo(Box::new(d)));
@@ -633,7 +688,26 @@ impl Editor {
         let disp = &self.ws.display;
         let mut best: Option<(f32, Vec3)> = None;
         let mut budget = 2_000_000usize;
+        let editing = self.ws.edit.as_ref().map(|e| e.object as u32);
+        // The mesh being edited: its vertices that do not move.
+        if let Some(e) = &self.ws.edit {
+            for v in 0..e.mesh.vertex_count() as u32 {
+                if e.sel.has_vert(v) {
+                    continue;
+                }
+                let w = e.world(v);
+                if let Some((sx, sy, _)) = proj.to_screen(w) {
+                    let dist = (sx - x).hypot(sy - y);
+                    if dist <= reach && best.is_none_or(|b| dist < b.0) {
+                        best = Some((dist, w));
+                    }
+                }
+            }
+        }
         for dr in &disp.draws {
+            if dr.object.is_some() && dr.object == editing {
+                continue;
+            }
             if dr.object.is_some_and(|o| self.ws.sel.objects.get(o as usize).copied().unwrap_or(false)) {
                 continue;
             }
@@ -685,11 +759,13 @@ impl Editor {
     pub fn surface_at(&self, proj: &Proj, x: f32, y: f32) -> Option<Vec3> {
         let scene = &self.ws.scene;
         let mut ray = proj.ray(x, y);
+        // The object being edited is not where the scene has it.
+        let editing = self.ws.edit.as_ref().map(|e| e.object as u32 + 1);
         for _ in 0..64 {
             let hit = scene.intersect(&ray, f32::INFINITY)?;
             let p = ray.o + ray.d * hit.t;
             let id = scene.object_of(hit.prim, hit.inst).map(|o| o as u32 + 1);
-            if !id.is_some_and(|id| self.ws.sel.has_id(id) || self.ws.hidden.has_id(id)) {
+            if !id.is_some_and(|id| self.ws.sel.has_id(id) || self.ws.hidden.has_id(id) || Some(id) == editing) {
                 return Some(p);
             }
             ray.o = p + ray.d * (1e-4 * (1.0 + p.length()));
@@ -700,6 +776,20 @@ impl Editor {
     /// Writes gesture `g` for every item of the drag and moves them in place.
     fn apply_gesture(&mut self, d: &mut GizmoDrag, g: Gesture) {
         d.gesture = g;
+        if let Some(ed) = &mut d.edit {
+            // Vertices: each moved by its weight of the gesture, in the world.
+            let map = xform::gesture_map(&g, d.pivot, &d.axes);
+            if let Some(e) = &mut self.ws.edit {
+                for &(v, w) in &ed.weights {
+                    let p = e.xf.point(ed.base[v as usize]);
+                    e.mesh.positions[v as usize] = e.xf.inv_point(p + (map.point(p) - p) * w);
+                }
+                ed.moved = true;
+            }
+            self.ws.move_edit();
+            self.vp_dirty = true;
+            return;
+        }
         let merge = d.merge.clone();
         let mut failed = None;
         for item in &mut d.items {
@@ -784,6 +874,14 @@ impl Editor {
                 self.drag_handle(&mut h, lx, ly);
                 self.tool_drag = Some(ToolDrag::Handle(h));
             }
+            Some(ToolDrag::Knife(k)) => {
+                let view = k.view;
+                self.tool_drag = Some(ToolDrag::Knife(k));
+                if let Some(r) = view {
+                    let (lx, ly) = self.local(&r, x, y);
+                    self.knife_move(lx, ly);
+                }
+            }
             other => {
                 self.tool_drag = other;
                 self.vp_dirty = true;
@@ -794,6 +892,20 @@ impl Editor {
     /// The tool drag ends (the button was let go, or Enter).
     pub fn tool_release(&mut self, x: i32, y: i32) {
         match self.tool_drag.take() {
+            Some(ToolDrag::Gizmo(d)) if d.edit.is_some() => {
+                let Some(ed) = d.edit else { return };
+                if ed.moved
+                    && let Some(e) = &mut self.ws.edit
+                {
+                    e.record(ed.before);
+                    let n = ed.weights.len();
+                    self.notify(format!("{}d {n} vertices", d.tool.name()));
+                }
+                self.edit_changed();
+            }
+            Some(ToolDrag::Knife(k)) => self.knife_cut(&k),
+            // Not drags: they end with a click or a key.
+            other @ Some(ToolDrag::Modal(_) | ToolDrag::LoopCut(_)) => self.tool_drag = other,
             Some(ToolDrag::Gizmo(d)) => {
                 self.ws.doc.seal();
                 // Scatters are placed again by the loader exactly; a fallback has reloaded.
@@ -829,9 +941,33 @@ impl Editor {
         self.vp_dirty = true;
     }
 
+    /// The radius of proportional editing changed while vertices are dragged: which move
+    /// and how much again, and the gesture done again with that.
+    pub fn proportional_changed(&mut self) {
+        let Some(ToolDrag::Gizmo(mut d)) = self.tool_drag.take() else { return };
+        if let (Some(ed), Some(e)) = (&mut d.edit, &mut self.ws.edit) {
+            e.mesh.positions.clone_from(&ed.base);
+            ed.weights = e.weights();
+        }
+        let g = d.gesture;
+        self.apply_gesture(&mut d, g);
+        self.tool_drag = Some(ToolDrag::Gizmo(d));
+    }
+
     /// Esc during a gizmo drag: everything goes back.
     pub fn tool_cancel(&mut self) {
         match self.tool_drag.take() {
+            Some(ToolDrag::Gizmo(d)) if d.edit.is_some() => {
+                if let (Some(ed), Some(e)) = (d.edit, &mut self.ws.edit) {
+                    e.mesh.positions = ed.base;
+                }
+                self.ws.move_edit();
+                self.notify("cancelled");
+            }
+            other @ Some(ToolDrag::Modal(_) | ToolDrag::LoopCut(_) | ToolDrag::Knife(_)) => {
+                self.tool_drag = other;
+                self.modal_cancel();
+            }
             Some(ToolDrag::Gizmo(d)) if d.wrote => {
                 self.ws.doc.seal();
                 if self.ws.doc.undo().is_ok() {
@@ -853,6 +989,9 @@ impl Editor {
     /// Keys during a gizmo drag: numbers typed, X / Y / Z for the axis, Enter, Escape.
     /// Returns whether a drag is going on (and took the keys).
     pub fn tool_keys(&mut self) -> bool {
+        if let Some(taken) = self.modal_keys() {
+            return taken;
+        }
         let Some(ToolDrag::Gizmo(_)) = &self.tool_drag else {
             if self.tool_drag.is_some() && self.ui.take_key(Key::Escape) {
                 self.tool_cancel();

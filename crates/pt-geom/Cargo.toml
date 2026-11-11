@@ -1,0 +1,11 @@
+[package]
+name = "pt-geom"
+version.workspace = true
+edition.workspace = true
+description = "Modeling kernel shared by the editor and the path tracer: half-edge meshes and their operations"
+
+[dependencies]
+pt-core.workspace = true
+
+[lints]
+workspace = true

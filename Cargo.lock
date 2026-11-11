@@ -14,8 +14,16 @@ name = "pt-core"
 version = "0.1.0"
 
 [[package]]
+name = "pt-geom"
+version = "0.1.0"
+dependencies = [
+ "pt-core",
+]
+
+[[package]]
 name = "ptedit"
 version = "0.1.0"
 dependencies = [
  "pt-core",
+ "pt-geom",
 ]

@@ -90,6 +90,8 @@ pub struct Workspace {
     /// The background's `rotate` as loaded, and as being dragged (shown before reloading).
     pub env_loaded: Vec3,
     pub env_preview: Option<Vec3>,
+    /// The object being edited as a mesh (edit mode).
+    pub edit: Option<crate::modeling::EditMesh>,
 }
 
 /// A `rotate` value of `[background]`: a number turns about +Y.
@@ -163,7 +165,34 @@ impl Workspace {
             decor: Decor::default(),
             env_loaded,
             env_preview: None,
+            edit: None,
         })
+    }
+
+    /// Shows the mesh being edited in place of its object (after it changed, or after the
+    /// display was built again).
+    pub fn show_edit(&mut self) {
+        let Some(e) = &self.edit else { return };
+        let material = self.display.material_of(e.object);
+        let mesh = crate::display::Mesh::of_polygons(&e.mesh, material, &e.sel.faces);
+        self.display.set_edit_mesh(e.object, mesh, e.xf);
+    }
+
+    /// The mesh being edited moved (same faces).
+    pub fn move_edit(&mut self) {
+        if let Some(e) = &self.edit {
+            self.display.move_edit_mesh(&e.mesh.positions);
+        }
+    }
+
+    /// Reversed depth drawn last at view-local pixel (`x`, `y`) of view `view`; None when
+    /// that view has not been drawn at its size.
+    pub fn depth_at(&self, view: usize, w: usize, h: usize, x: f32, y: f32) -> Option<f32> {
+        let t = self.targets.get(view)?;
+        if (t.w, t.h) != (w, h) || x < 0.0 || y < 0.0 || x >= w as f32 || y >= h as f32 {
+            return None;
+        }
+        Some(t.depth[y as usize * w + x as usize])
     }
 
     /// Rebuilds the scene after the document changed; the views stay where they are. When
@@ -172,6 +201,17 @@ impl Workspace {
         let scene = self.doc.to_scene().inspect_err(|e| self.load_error = Some(e.clone()))?;
         self.load_error = None;
         self.display = Display::build(&scene);
+        if self.edit.as_ref().is_some_and(|e| e.object < scene.provenance.objects.len()) {
+            // The object's transform may have been changed in the inspector.
+            if let Some(e) = &mut self.edit
+                && let Some(Value::Table(t)) = self.doc.value(e.file, &e.path)
+            {
+                e.xf = crate::modeling::object_xf(&t);
+            }
+            self.show_edit();
+        } else {
+            self.edit = None;
+        }
         let (objects, lights) = (scene.provenance.objects.len(), scene.provenance.lights.len());
         if (objects, lights) != (self.sel.objects.len(), self.sel.lights.len()) {
             self.sel = Selection::new(objects, lights);
@@ -193,6 +233,7 @@ impl Workspace {
             if let Ok(s) = self.doc.to_scene() {
                 self.scene = Arc::new(s);
                 self.display = Display::build(&self.scene);
+                self.show_edit();
             }
         }
         Arc::get_mut(&mut self.scene).expect("the render thread released the scene")
@@ -269,6 +310,9 @@ impl Workspace {
             overlay::lights(&mut o, &proj, &self.scene, &self.display, &self.sel, &self.hidden, scale);
             overlay::bounds(&mut o, &self.display, &self.sel, &self.hidden, self.all_bounds);
             overlay::axis_indicator(&mut o, &proj, scale);
+            if let Some(e) = &self.edit {
+                crate::modeling::overlays(&mut o, &proj, e, self.shading, scale);
+            }
             crate::gizmo::draw_decor(&mut o, &self.decor, &proj);
             let mut label = view.kind.name().to_owned();
             if !view.is_fixed() {
