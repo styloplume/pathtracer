@@ -46,19 +46,26 @@ crates/
 
 ## E1 — Viewport
 
-- [ ] Software rasterizer: tiled and multithreaded, depth buffer, perspective-correct interpolation, clipping;
+- [x] Software rasterizer: tiled and multithreaded, depth buffer, perspective-correct interpolation, clipping;
   modes: wireframe, solid (flat / Lambert headlight), shaded (base color), wireframe over solid
-- [ ] Blitted through the existing Win32 / X11 / Cocoa image paths; redraws only when something changes
-- [ ] Viewport camera separate from the scene camera; orbit / pan / zoom / fly from `controls.rs`; frame the
+- [x] Blitted through the existing Win32 / X11 / Cocoa image paths; redraws only when something changes
+- [x] Viewport camera separate from the scene camera; orbit / pan / zoom / fly from `controls.rs`; frame the
   selection; switch between perspective and orthographic views
-- [ ] Layouts: single view, and four views (top, front, side, perspective) with a maximize toggle
-- [ ] Ground grid that adapts to the zoom level, world axes, a small axis indicator in the corner
-- [ ] Display of every object type: analytic shapes tessellated at screen-adaptive density; meshes; instances
+- [x] Layouts: single view, and four views (top, front, side, perspective) with a maximize toggle
+- [x] Ground grid that adapts to the zoom level, world axes, a small axis indicator in the corner
+- [x] Display of every object type: analytic shapes tessellated at screen-adaptive density; meshes; instances
   (scatters as bounding boxes past a threshold); implicit surfaces as bounding boxes for now
-- [ ] Overlays: the scene camera's frustum, light icons, bounding boxes, the selection outline
-- [ ] Picking through the BVH (same code as the tracer); rectangle selection
-- [ ] Performance target: interactive at 1080p for ~300k visible triangles; level-of-detail by object size on
+- [x] Overlays: the scene camera's frustum, light icons, bounding boxes, the selection outline
+- [x] Picking through the BVH (same code as the tracer); rectangle selection
+- [x] Performance target: interactive at 1080p for ~300k visible triangles; level-of-detail by object size on
   screen above that
+- How E1 turned out: the loader records which `[[objects]]` / `[[lights]]` entry made each primitive, instance
+  and light (`Scene::provenance`), so BVH hits map back to document items. Scatter instances and meshes too small
+  on screen (or past a 400k-triangle budget) show as solid boxes; implicit surfaces as wire boxes. Rectangle
+  selection takes what is visible in the rectangle (the id buffer). Moving objects show where the shutter opens.
+  The sky's sun is drawn but not selectable (it is not a `[[lights]]` entry). `ptedit --snapshot` renders the
+  viewport headless for tests and timing: 300k triangles at 1080p draw in ~10 ms, the 56 000-instance forest of
+  `scenes/instancing.toml` in ~25 ms (16 threads).
 
 ## E2 — UI toolkit
 

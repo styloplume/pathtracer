@@ -68,6 +68,29 @@ impl CameraController {
         self.target + self.dir() * self.distance
     }
 
+    /// The point orbited around.
+    pub fn target(&self) -> Vec3 {
+        self.target
+    }
+
+    /// Distance from the camera to the target.
+    pub fn distance(&self) -> f32 {
+        self.distance
+    }
+
+    /// Vertical field of view in degrees.
+    pub fn fov(&self) -> f32 {
+        self.fov
+    }
+
+    /// Keeps the viewing direction and moves so the sphere at `center` with `radius` just
+    /// fills the view vertically.
+    pub fn frame(&mut self, center: Vec3, radius: f32) {
+        let half = (self.fov.to_radians() * 0.5).clamp(0.01, 1.5);
+        self.target = center;
+        self.distance = (radius.max(1e-4) / half.sin()).max(1e-3);
+    }
+
     /// Camera right and up vectors (same construction as `Camera::new`).
     fn basis(&self) -> (Vec3, Vec3) {
         let w = self.dir();

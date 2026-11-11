@@ -112,6 +112,26 @@ impl Material {
         }
     }
 
+    /// A representative linear RGB color for previews (the editor's shaded view): the
+    /// base or average texture color; emitters at full brightness in their own hue.
+    pub fn preview_color(&self) -> Vec3 {
+        let c = match &self.kind {
+            MaterialKind::Diffuse { albedo: c }
+            | MaterialKind::Conductor { color: c, .. }
+            | MaterialKind::Plastic { color: c, .. }
+            | MaterialKind::Subsurface { color: c, .. } => c.mean(),
+            MaterialKind::Principled(p) => p.base_color.mean(),
+            MaterialKind::Dielectric { .. } => Vec3::new(0.75, 0.88, 0.95),
+            MaterialKind::Interface => Vec3::splat(0.6),
+            MaterialKind::Emissive { emission, .. } => {
+                let e = emission.mean();
+                let m = e.max_elem();
+                if m > 0.0 { e * (1.0 / m) } else { Vec3::ZERO }
+            }
+        };
+        if c.is_finite() { c.max(Vec3::ZERO).min(Vec3::ONE) } else { Vec3::splat(0.5) }
+    }
+
     pub fn is_emissive(&self) -> bool {
         matches!(self.kind, MaterialKind::Emissive { .. })
     }

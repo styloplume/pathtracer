@@ -21,7 +21,11 @@ use crate::rng::hash64;
 use crate::sampler::SamplerKind;
 use crate::shapes::{Shape, ShapeKind};
 use crate::texture::TexCtx;
+use std::ops::Range;
 use std::time::{Duration, Instant};
+
+/// `Scene::instance_origin` of the world instance (it comes from no `InstanceDesc`).
+const WORLD: u32 = u32::MAX;
 
 #[derive(Clone, Debug)]
 pub struct RenderSettings {
@@ -192,6 +196,24 @@ pub struct InstanceDesc {
     pub xf: InstanceXf,
 }
 
+/// Where one `[[objects]]` entry's geometry went: its triangles and shapes, and the
+/// instances it placed (indices into `Geometry::instances`). Ranges of consecutive
+/// objects never overlap and follow the objects' order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ObjectSpan {
+    pub triangles: Range<u32>,
+    pub shapes: Range<u32>,
+    pub instances: Range<u32>,
+}
+
+/// Which scene entries produced what (for the editor): one span per `[[objects]]` entry,
+/// and the range of `Scene::lights` holding the `[[lights]]` entries, in order.
+#[derive(Clone, Debug, Default)]
+pub struct Provenance {
+    pub objects: Vec<ObjectSpan>,
+    pub lights: Range<u32>,
+}
+
 /// Geometry arrays handed to `Scene::new`.
 #[derive(Default)]
 pub struct Geometry {
@@ -227,6 +249,10 @@ pub struct Scene {
     /// One BVH per geometry group; leaf indices are primitive ids.
     blas: Vec<Bvh>,
     instances: Vec<InstanceDesc>,
+    /// Index into `Geometry::instances` of each instance (`WORLD` for the world group).
+    instance_origin: Vec<u32>,
+    /// The scene entries each primitive, instance and light comes from (set by the loader).
+    pub provenance: Provenance,
     /// BVH over the instances' world bounds; leaf indices are instance ids.
     tlas: Bvh,
     /// True if any material has an alpha mask (enables alpha testing in traversal).
@@ -270,6 +296,8 @@ impl Scene {
             has_media,
             blas: Vec::new(),
             instances: Vec::new(),
+            instance_origin: Vec::new(),
+            provenance: Provenance::default(),
             tlas: Bvh::build(&[]),
             any_alpha,
             lights,
@@ -312,8 +340,14 @@ impl Scene {
 
         if !members[0].is_empty() {
             scene.instances.push(InstanceDesc { group: 0, xf: InstanceXf::Identity });
+            scene.instance_origin.push(WORLD);
         }
-        scene.instances.extend(geo.instances.iter().filter(|i| !members[i.group as usize].is_empty()));
+        for (i, inst) in geo.instances.iter().enumerate() {
+            if !members[inst.group as usize].is_empty() {
+                scene.instances.push(*inst);
+                scene.instance_origin.push(i as u32);
+            }
+        }
         let inst_bounds: Vec<Aabb> =
             scene.instances.iter().map(|i| i.xf.bounds(&scene.blas[i.group as usize].bounds())).collect();
         scene.tlas = Bvh::build(&inst_bounds);
@@ -364,14 +398,60 @@ impl Scene {
         )
     }
 
+    /// The placed geometry groups: the world (group 0, identity) if it has primitives,
+    /// then every instance whose group has primitives.
+    pub fn instances(&self) -> &[InstanceDesc] {
+        &self.instances
+    }
+
+    /// The primitives of geometry group `group`.
+    pub fn group_prims(&self, group: u32) -> &[u32] {
+        &self.blas[group as usize].indices
+    }
+
+    /// Bounds of geometry group `group` in its own space.
+    pub fn group_bounds(&self, group: u32) -> Aabb {
+        self.blas[group as usize].bounds()
+    }
+
+    /// The `[[objects]]` entry that placed instance `inst` (an index into `instances()`);
+    /// None for the world instance.
+    pub fn instance_object(&self, inst: u32) -> Option<usize> {
+        let origin = *self.instance_origin.get(inst as usize)?;
+        if origin == WORLD {
+            return None;
+        }
+        let objs = &self.provenance.objects;
+        let i = objs.partition_point(|s| s.instances.end <= origin);
+        objs.get(i).filter(|s| s.instances.contains(&origin)).map(|_| i)
+    }
+
+    /// The `[[objects]]` entry whose geometry a hit on primitive `prim` through instance
+    /// `inst` belongs to (an instance's placing object, else the primitive's own).
+    pub fn object_of(&self, prim: u32, inst: u32) -> Option<usize> {
+        if let Some(i) = self.instance_object(inst) {
+            return Some(i);
+        }
+        let objs = &self.provenance.objects;
+        let nt = self.triangles.len() as u32;
+        let i = if prim < nt {
+            objs.partition_point(|s| s.triangles.end <= prim)
+        } else {
+            objs.partition_point(|s| s.shapes.end <= prim - nt)
+        };
+        let s = objs.get(i)?;
+        let inside = if prim < nt { s.triangles.contains(&prim) } else { s.shapes.contains(&(prim - nt)) };
+        inside.then_some(i)
+    }
+
     #[inline]
-    pub(crate) fn tri_points(&self, t: &Triangle) -> (Vec3, Vec3, Vec3) {
+    pub fn tri_points(&self, t: &Triangle) -> (Vec3, Vec3, Vec3) {
         (self.positions[t.v[0] as usize], self.positions[t.v[1] as usize], self.positions[t.v[2] as usize])
     }
 
     /// The shape of primitive `prim`, None for triangles.
     #[inline]
-    pub(crate) fn shape(&self, prim: u32) -> Option<&Shape> {
+    pub fn shape(&self, prim: u32) -> Option<&Shape> {
         (prim as usize).checked_sub(self.triangles.len()).map(|i| &self.shapes[i])
     }
 
@@ -388,7 +468,7 @@ impl Scene {
         b
     }
 
-    pub(crate) fn prim_material(&self, prim: u32) -> u32 {
+    pub fn prim_material(&self, prim: u32) -> u32 {
         self.shape(prim).map_or_else(|| self.triangles[prim as usize].material, |s| s.material)
     }
 

@@ -18,7 +18,7 @@ use crate::mtl::{self, MtlMap, MtlMaterial};
 use crate::noise::FractalKind;
 use crate::output::{Aov, Format, OutputSettings};
 use crate::sampler::{SAMPLER_NAMES, SamplerKind};
-use crate::scene::{Geometry, InstanceDesc, RenderSettings, Scene};
+use crate::scene::{Geometry, InstanceDesc, ObjectSpan, Provenance, RenderSettings, Scene};
 use crate::shapes::Shape;
 use crate::sky::{SUN_RADIUS, Sky};
 use crate::spectrum::blackbody_rgb;
@@ -78,6 +78,7 @@ fn load(path: &Path, read: Source<'_>, warn: bool) -> Result<Scene, String> {
     let mut b = Builder { n_groups: 1, files, ..Builder::default() };
     let background = section("background")?;
     let mut lights = b.parse_background(background, &dir_of(background, base_dir))?;
+    let first_light = lights.len() as u32;
     if let Some(ls) = doc.get("lights") {
         let ls = ls.as_array().ok_or("'lights' must be an array of tables ([[lights]])")?;
         for (i, l) in ls.iter().enumerate() {
@@ -86,6 +87,7 @@ fn load(path: &Path, read: Source<'_>, warn: bool) -> Result<Scene, String> {
             lights.push(parse_light(t, &ctx)?);
         }
     }
+    let mut provenance = Provenance { objects: Vec::new(), lights: first_light..lights.len() as u32 };
     for (name, v) in section("media")? {
         let ctx = format!("[media.{name}]");
         let t = v.as_table().ok_or_else(|| format!("{ctx} must be a table"))?;
@@ -107,7 +109,15 @@ fn load(path: &Path, read: Source<'_>, warn: bool) -> Result<Scene, String> {
         for (i, o) in objs.iter().enumerate() {
             let ctx = format!("[[objects]] #{}", i + 1);
             let t = o.as_table().ok_or_else(|| format!("{ctx} must be a table"))?;
+            let counts = |b: &Builder| [b.triangles.len(), b.shapes.len(), b.instances.len()].map(|n| n as u32);
+            let start = counts(&b);
             b.add_object(t, &ctx, base_dir)?;
+            let end = counts(&b);
+            provenance.objects.push(ObjectSpan {
+                triangles: start[0]..end[0],
+                shapes: start[1]..end[1],
+                instances: start[2]..end[2],
+            });
         }
     }
 
@@ -131,6 +141,7 @@ fn load(path: &Path, read: Source<'_>, warn: bool) -> Result<Scene, String> {
     scene.media = b.media;
     scene.files = b.files;
     scene.output = output;
+    scene.provenance = provenance;
     Ok(scene)
 }
 
@@ -1218,6 +1229,52 @@ mod tests {
         );
         let forest = load_scene(&dir.join("instancing.toml")).unwrap();
         assert!(forest.stats().contains("56003 instances"), "{}", forest.stats());
+    }
+
+    /// Every primitive and instance is traced back to the `[[objects]]` entry that made
+    /// it, and `[[lights]]` entries to their lights.
+    #[test]
+    fn provenance_maps_hits_to_objects() {
+        let src = "\
+[[lights]]
+type = \"point\"
+position = [0, 5, 0]
+[prototypes.p]
+type = \"sphere\"
+[[objects]]
+type = \"quad\"
+origin = [-1, -1, -5]
+u = [2, 0, 0]
+v = [0, 2, 0]
+[[objects]]
+type = \"sphere\"
+center = [5, 0, -5]
+[[objects]]
+type = \"sphere\"
+center = [0, 0, -1]
+scale = [2, 1, 1]
+[[objects]]
+type = \"instance\"
+prototype = \"p\"
+translate = [-5, 0, -5]
+";
+        let s = load_scene_from(Path::new("t.toml"), &|_| Ok(src.to_owned())).unwrap();
+        let p = &s.provenance;
+        assert_eq!(p.objects.len(), 4);
+        assert_eq!(p.lights, 0..1);
+        assert!(matches!(s.lights()[0], Light::Point { .. }));
+        assert_eq!(p.objects[0].triangles, 0..2);
+        assert_eq!(p.objects[1].shapes.len(), 1);
+        assert_eq!((p.objects[2].shapes.len(), p.objects[2].instances.len()), (1, 1), "non-uniform scale");
+        let pick = |x: f32, y: f32| {
+            let ray = crate::math::Ray::new(Vec3::new(x, y, 5.0), Vec3::new(0.0, 0.0, -1.0), 0.0);
+            s.intersect(&ray, f32::INFINITY).and_then(|h| s.object_of(h.prim, h.inst))
+        };
+        assert_eq!(pick(0.0, 0.0), Some(2), "the stretched sphere in front of the quad");
+        assert_eq!(pick(0.9, 0.95), Some(0));
+        assert_eq!(pick(5.0, 0.0), Some(1));
+        assert_eq!(pick(-5.0, 0.0), Some(3));
+        assert_eq!(pick(20.0, 0.0), None);
     }
 
     #[test]

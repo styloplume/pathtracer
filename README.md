@@ -42,6 +42,29 @@ Any camera change restarts the progressive render. Rows appear as they finish, s
 while they run. Saving the scene file (or a mesh it references) reloads it automatically. Interactive camera,
 exposure and tonemap changes are kept unless that part of the file changed.
 
+### Editor
+
+`ptedit scene.toml` shows the scene in a rasterized viewport (own multithreaded software rasterizer) with its own
+cameras: one perspective view, or top / front / side / perspective. Objects are drawn from the same scene the tracer
+renders; clicking picks through the tracer's BVH. `ptedit --snapshot scene.toml out.png [--size WxH] [--quad]
+[--shading wire|solid|shaded|wiresolid] [--select N] [--frames N]` draws the viewport into a PNG without a window
+and prints the frame time. Planned work is in [`EDITOR_ROADMAP.md`](EDITOR_ROADMAP.md).
+
+| Input | Action |
+|---|---|
+| Left click / drag | select / rectangle select (`Shift` adds, `Ctrl` toggles) |
+| Middle drag, `Alt` + left drag | orbit (pan in the top / front / side views) |
+| `Shift` + middle drag, `Alt` + `Shift` + left drag | pan |
+| Right drag, with `W A S D Q E` | look around and fly (`Shift`: 4× speed) |
+| Wheel | dolly / zoom |
+| `F` / `Home` | frame the selection (or the scene) / reset the view |
+| `O` | perspective / orthographic (perspective view) |
+| `1`–`4`, `Z` | wireframe / solid / shaded (material colors) / wireframe on solid |
+| `L` / `Space` | one view or four / maximize the view under the mouse |
+| `G` / `B` | grid / bounding boxes of all objects |
+| `Ctrl+A`, `Esc` | select all; clear the selection (`Esc` again quits) |
+| `Ctrl+S`, `Ctrl+Z`, `Ctrl+Y` | save, undo, redo |
+
 ## Features
 
 - **Progressive display** filling the whole window: coarse 32×32 blocks refine by halving down to 1×1 (each level only traces pixels not yet traced, so the preview costs nothing extra), then whole-image passes accumulate samples per pixel.
@@ -86,7 +109,14 @@ exposure and tonemap changes are kept unless that part of the file changed.
 | `crates/pathtracer/src/main.rs` | the `pathtracer` binary: CLI, headless rendering |
 | `crates/pathtracer/src/bench.rs` | `pathtracer bench`: build times and ray throughput |
 | `crates/pathtracer/src/app.rs` | windowed front end: UI thread, render thread, input, HUD, hot reload |
-| `crates/ptedit/src/main.rs` | the `ptedit` scene editor: opens, shows and saves a scene document; `ptedit --check` |
+| `crates/ptedit/src/main.rs` | the `ptedit` scene editor: window, input, `--check`, `--snapshot` |
+| `crates/ptedit/src/workspace.rs` | the editor's state: document, scene, views and layout, selection, picking; draws all views |
+| `crates/ptedit/src/raster.rs` | software rasterizer: clipping, tile binning, multithreaded triangles and lines, reversed depth, id buffer |
+| `crates/ptedit/src/display.rs` | what the viewport draws: meshes per object, shapes as canonical meshes at several levels of detail, boxes |
+| `crates/ptedit/src/render.rs` | one view's frame: culling, level of detail, triangle budget, shading modes, selection outline |
+| `crates/ptedit/src/view.rs` | viewport cameras (perspective / orthographic, top / front / side), projection, picking rays |
+| `crates/ptedit/src/overlay.rs` | grid, axes, axis indicator, camera frustum, light helpers, bounding boxes, selection state |
+| `crates/ptedit/src/paint.rs` | 2D drawing and a 5×7 bitmap font for labels |
 | `crates/pt-core/src/document/` | the editor's scene document: the scene's files as editable TOML, the tree of what the merged scene contains and where each item is written, undo / redo |
 | `crates/pt-core/src/schema.rs` | the scene format as data (sections, keys, types, defaults, ranges, aliases); validation with typo suggestions |
 | `crates/pt-core/src/controls.rs` | orbit / pan / look / fly camera controller |
