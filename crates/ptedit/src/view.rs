@@ -127,6 +127,33 @@ impl View {
         }
     }
 
+    /// The perspective view as a scene camera (for the path-traced view): a pinhole, or an
+    /// orthographic camera when the view is shown so.
+    pub fn camera_desc(&self) -> CameraDesc {
+        let mut d = self.ctl.desc();
+        d.aperture = 0.0;
+        d.focus_distance = None;
+        d.motion = None;
+        if self.ortho {
+            d.projection = pt_core::camera::Projection::Orthographic;
+            d.ortho_height = Some(2.0 * self.ctl.distance() * (self.ctl.fov().to_radians() * 0.5).tan());
+        } else {
+            d.projection = pt_core::camera::Projection::Perspective;
+        }
+        d
+    }
+
+    /// Takes the pose and field of view of `camera` (looking through the scene camera).
+    pub fn set_camera(&mut self, camera: &CameraDesc) {
+        self.ctl = CameraController::new(camera);
+        self.ortho = false;
+    }
+
+    /// The perspective view's pose as the scene camera's keys: position and look-at.
+    pub fn pose(&self) -> (Vec3, Vec3) {
+        (self.ctl.position(), self.ctl.target())
+    }
+
     /// The view's camera for a `w`x`h` viewport, with depth range covering `scene`.
     pub fn proj(&self, w: usize, h: usize, scene: &Aabb) -> Proj {
         let aspect = w.max(1) as f32 / h.max(1) as f32;

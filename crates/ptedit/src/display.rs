@@ -235,6 +235,29 @@ impl Display {
         d
     }
 
+    /// Moves what `[[objects]]` entry `object` draws by `delta` (after its placement), as
+    /// `Scene::transform_object` moves its geometry.
+    pub fn transform_object(&mut self, object: usize, delta: &Transform) {
+        let mut b = Aabb::EMPTY;
+        let local: Vec<(usize, Aabb)> = (0..self.draws.len())
+            .filter(|&i| self.draws[i].object == Some(object as u32))
+            .map(|i| (i, self.local_bounds(self.draws[i].part)))
+            .collect();
+        for (i, lb) in local {
+            let d = &mut self.draws[i];
+            d.xf = d.xf.then(delta);
+            d.bounds = lb.transformed(&d.xf);
+            b.grow(&d.bounds);
+        }
+        if let Some(ob) = self.object_bounds.get_mut(object) {
+            *ob = b;
+        }
+        self.bounds = Aabb::EMPTY;
+        for d in &self.draws {
+            self.bounds.grow(&d.bounds);
+        }
+    }
+
     fn add_mesh(&mut self, scene: &Scene, tris: &[u32]) -> u32 {
         self.meshes.push(mesh_of(scene, tris));
         self.meshes.len() as u32 - 1
@@ -244,20 +267,24 @@ impl Display {
         if let Part::Shape(c) = part {
             self.add_canonical(c);
         }
-        let local = match part {
+        let bounds = self.local_bounds(part).transformed(&xf);
+        self.bounds.grow(&bounds);
+        if let Some(o) = object {
+            self.object_bounds[o as usize].grow(&bounds);
+        }
+        self.draws.push(Draw { part, xf, object, material, bounds });
+    }
+
+    /// Bounds of a part in its own space.
+    fn local_bounds(&self, part: Part) -> Aabb {
+        match part {
             Part::Mesh(m) => self.meshes[m as usize].bounds,
             Part::Shape(Canonical::Tube) => Aabb { min: Vec3::new(-1.0, -1.0, 0.0), max: Vec3::ONE },
             Part::Shape(Canonical::Disk(_)) => Aabb { min: Vec3::new(-1.0, -1.0, 0.0), max: Vec3::new(1.0, 1.0, 0.0) },
             Part::Shape(Canonical::Sphere | Canonical::Cube) | Part::Bounds | Part::Proxy => {
                 Aabb { min: Vec3::splat(-1.0), max: Vec3::ONE }
             }
-        };
-        let bounds = local.transformed(&xf);
-        self.bounds.grow(&bounds);
-        if let Some(o) = object {
-            self.object_bounds[o as usize].grow(&bounds);
         }
-        self.draws.push(Draw { part, xf, object, material, bounds });
     }
 
     /// The mesh of canonical shape `c` at level of detail `level` (an index into `LEVELS`).

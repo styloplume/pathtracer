@@ -176,9 +176,23 @@ struct Ctx<'a> {
     camera: Camera,
     cone: RayCone,
     filter: Filter,
+    /// Pixels per row rendered.
     w: usize,
-    h: usize,
+    /// Where they are in the whole image, and its size.
+    x0: usize,
+    y0: usize,
+    full_w: usize,
+    full_h: usize,
     threads: usize,
+}
+
+/// A part of an image: `w`x`h` pixels from (`x`, `y`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Region {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
 }
 
 /// Renders `w`x`h` progressively from `camera`. Returns the accumulated pixels, or
@@ -190,15 +204,31 @@ pub fn render_progressive(
     h: usize,
     progress: &dyn Progress,
 ) -> Option<Vec<Pixel>> {
+    render_region(scene, camera, (w, h), Region { x: 0, y: 0, w, h }, progress)
+}
+
+/// Like `render_progressive`, but only the pixels of `region` of a `full`-sized image
+/// (the pixels returned and passed to `progress` are the region's, row by row).
+pub fn render_region(
+    scene: &Scene,
+    camera: &CameraDesc,
+    full: (usize, usize),
+    region: Region,
+    progress: &dyn Progress,
+) -> Option<Vec<Pixel>> {
     let st = &scene.settings;
-    let cam = Camera::new(camera, w as f32 / h as f32);
+    let cam = Camera::new(camera, full.0 as f32 / full.1 as f32);
+    let (w, h) = (region.w.max(1), region.h.max(1));
     let ctx = Ctx {
         scene,
-        cone: cam.cone(h),
+        cone: cam.cone(full.1),
         camera: cam,
         filter: Filter::new(st.filter, st.filter_radius),
         w,
-        h,
+        x0: region.x,
+        y0: region.y,
+        full_w: full.0,
+        full_h: full.1,
         threads: thread_count(scene),
     };
     let target = st.spp.max(1);
@@ -363,11 +393,12 @@ fn run_pass(
 fn trace_pixel(ctx: &Ctx<'_>, x: usize, y: usize, sample: u32, guide: Option<&Guide>) -> PathSample {
     let scene = ctx.scene;
     let st = &scene.settings;
-    let mut smp = Sampler::new(st.sampler, x as u32, y as u32, ctx.w as u32, sample, st.seed);
+    let (x, y) = (x + ctx.x0, y + ctx.y0);
+    let mut smp = Sampler::new(st.sampler, x as u32, y as u32, ctx.full_w as u32, sample, st.seed);
     // Filter importance sampling: the offset from the pixel center follows the filter.
     let (u1, u2) = smp.get2d();
-    let s = (x as f32 + 0.5 + ctx.filter.sample(u1)) / ctx.w as f32;
-    let t = (y as f32 + 0.5 + ctx.filter.sample(u2)) / ctx.h as f32;
+    let s = (x as f32 + 0.5 + ctx.filter.sample(u1)) / ctx.full_w as f32;
+    let t = (y as f32 + 0.5 + ctx.filter.sample(u2)) / ctx.full_h as f32;
     // Outside a fisheye's image circle: black.
     let Some(ray) = ctx.camera.ray(s, t, &mut smp) else { return PathSample::default() };
     let mut ps = radiance(scene, ray, ctx.cone, &mut smp, guide);

@@ -10,15 +10,16 @@ use pt_core::document::Kind;
 use pt_core::platform::{Key, Modifiers};
 use std::path::PathBuf;
 
-const W: i32 = 1200;
-const H: i32 = 800;
-const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false };
+pub const W: i32 = 1200;
+pub const H: i32 = 800;
+pub const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false };
 
-struct Harness {
-    ed: Editor,
-    mouse: (i32, i32),
-    down: bool,
-    dir: PathBuf,
+pub struct Harness {
+    pub ed: Editor,
+    pub mouse: (i32, i32),
+    pub down: bool,
+    pub dir: PathBuf,
+    events: crate::editor::InputState,
 }
 
 impl Drop for Harness {
@@ -28,7 +29,7 @@ impl Drop for Harness {
 }
 
 impl Harness {
-    fn new(name: &str, scene: &str) -> Harness {
+    pub fn new(name: &str, scene: &str) -> Harness {
         let dir = std::env::temp_dir().join(format!("ptedit-ed-{name}-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -36,39 +37,92 @@ impl Harness {
         std::fs::write(&path, scene).unwrap();
         let ws = Workspace::open(&path).unwrap();
         let settings = Settings { font: "built-in".into(), ..Settings::default() };
-        let mut h = Harness { ed: Editor::new(ws, settings, None, 1.0), mouse: (0, 0), down: false, dir };
+        let events = crate::editor::InputState::new(std::time::Duration::from_millis(400));
+        let mut h = Harness { ed: Editor::new(ws, settings, None, 1.0), mouse: (0, 0), down: false, dir, events };
         h.frame(Input::default());
         h.frame(Input::default());
         h
     }
 
-    fn text(&self) -> String {
+    pub fn text(&self) -> String {
         self.ed.ws.doc.files[0].doc.text().to_owned()
     }
 
-    fn frame(&mut self, mut i: Input) {
+    /// Runs window events through the editor as the window loop does (the viewport sees
+    /// them too).
+    pub fn events(&mut self, evs: Vec<pt_core::platform::Event>) {
+        for batch in crate::editor::InputState::batches(evs) {
+            let i = self.events.input(&batch);
+            self.mouse = i.mouse;
+            self.down = i.down[0];
+            self.ed.frame(i, &batch, W, H);
+        }
+    }
+
+    /// A drag with `button` from `from` to `to` in steps, as window events.
+    pub fn drag_events(
+        &mut self,
+        button: pt_core::platform::MouseButton,
+        from: (i32, i32),
+        to: (i32, i32),
+        mods: Modifiers,
+    ) {
+        use pt_core::platform::Event;
+        self.events(vec![Event::MouseMove { x: from.0, y: from.1, mods }]);
+        self.events(vec![Event::MouseDown { button, x: from.0, y: from.1, mods }]);
+        for k in 1..=6 {
+            let t = k as f32 / 6.0;
+            let (x, y) = (from.0 + ((to.0 - from.0) as f32 * t) as i32, from.1 + ((to.1 - from.1) as f32 * t) as i32);
+            self.events(vec![Event::MouseMove { x, y, mods }]);
+        }
+        self.events(vec![Event::MouseUp { button, x: to.0, y: to.1, mods }]);
+        self.idle();
+    }
+
+    /// A key press (and its typed character, for printable keys) as window events.
+    pub fn key_event(&mut self, key: Key, mods: Modifiers) {
+        use pt_core::platform::Event;
+        let mut evs = vec![Event::KeyDown { key, mods, repeat: false }];
+        if let Key::Char(c) = key
+            && !mods.ctrl
+        {
+            evs.push(Event::Text(c));
+        }
+        evs.push(Event::KeyUp { key, mods });
+        self.events(evs);
+    }
+
+    /// Window pixel of world point `p` in the view drawn last (the single perspective view).
+    pub fn screen_of(&self, p: pt_core::math::Vec3) -> (i32, i32) {
+        let vp = self.ed.vp;
+        let r = self.ed.ws.rects(vp.w as usize, vp.h as usize)[0];
+        let (x, y, _) = self.ed.ws.proj(&r).to_screen(p).expect("in front of the view");
+        (vp.x + r.x as i32 + x as i32, vp.y + r.y as i32 + y as i32)
+    }
+
+    pub fn frame(&mut self, mut i: Input) {
         i.mouse = self.mouse;
         i.down[0] = self.down;
         self.ed.frame(i, &[], W, H);
     }
 
-    fn idle(&mut self) {
+    pub fn idle(&mut self) {
         self.frame(Input::default());
     }
 
-    fn rect(&self, probe: &str) -> Rect {
+    pub fn rect(&self, probe: &str) -> Rect {
         self.ed.probe_rect(probe).unwrap_or_else(|| {
             let names: Vec<&str> = self.ed.probes.iter().map(|(n, _)| n.as_str()).collect();
             panic!("no probe '{probe}' among {names:?}")
         })
     }
 
-    fn move_to(&mut self, x: i32, y: i32) {
+    pub fn move_to(&mut self, x: i32, y: i32) {
         self.mouse = (x, y);
         self.idle();
     }
 
-    fn press(&mut self, clicks: u8) {
+    pub fn press(&mut self, clicks: u8) {
         self.down = true;
         let mut i = Input::default();
         i.pressed[0] = true;
@@ -76,21 +130,21 @@ impl Harness {
         self.frame(i);
     }
 
-    fn release(&mut self) {
+    pub fn release(&mut self) {
         self.down = false;
         let mut i = Input::default();
         i.released[0] = true;
         self.frame(i);
     }
 
-    fn click_at(&mut self, x: i32, y: i32, clicks: u8) {
+    pub fn click_at(&mut self, x: i32, y: i32, clicks: u8) {
         self.move_to(x, y);
         self.press(clicks);
         self.release();
     }
 
     /// Clicks probe `name` (at `fx` of its width), or double-clicks it.
-    fn click(&mut self, name: &str, fx: f32, clicks: u8) {
+    pub fn click(&mut self, name: &str, fx: f32, clicks: u8) {
         let r = self.rect(name);
         let (x, y) = (r.x + (r.w as f32 * fx) as i32, r.y + r.h / 2);
         for c in 1..=clicks {
@@ -98,7 +152,7 @@ impl Harness {
         }
     }
 
-    fn drag(&mut self, from: (i32, i32), to: (i32, i32)) {
+    pub fn drag(&mut self, from: (i32, i32), to: (i32, i32)) {
         self.move_to(from.0, from.1);
         self.press(1);
         for k in 1..=4 {
@@ -108,13 +162,13 @@ impl Harness {
         self.release();
     }
 
-    fn keys(&mut self, keys: &[(Key, Modifiers)], text: &str) {
+    pub fn keys(&mut self, keys: &[(Key, Modifiers)], text: &str) {
         let i = Input { keys: keys.to_vec(), text: text.into(), ..Input::default() };
         self.frame(i);
     }
 
     /// Whether the last frame drew text containing `s`.
-    fn shows(&self, s: &str) -> bool {
+    pub fn shows(&self, s: &str) -> bool {
         self.ed.ui.cmds.iter().any(|c| matches!(&c.shape, Shape::Text { text, .. } if text.contains(s)))
     }
 }

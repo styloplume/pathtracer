@@ -20,7 +20,13 @@ pub enum Shading {
     Shaded,
     /// Solid with the wireframe on top.
     WireSolid,
+    /// Surfaces (and the background) in the key color, for the path-traced image to replace;
+    /// overlays and the selection outline on top.
+    Rendered,
 }
+
+/// The color `Shading::Rendered` fills surfaces and the background with.
+pub const KEY: u32 = 0x01_02_03;
 
 impl Shading {
     pub const ALL: [Shading; 4] = [Shading::Wireframe, Shading::Solid, Shading::Shaded, Shading::WireSolid];
@@ -31,6 +37,7 @@ impl Shading {
             Shading::Solid => "solid",
             Shading::Shaded => "shaded",
             Shading::WireSolid => "wireframe on solid",
+            Shading::Rendered => "rendered",
         }
     }
 
@@ -154,6 +161,10 @@ pub fn render(
         for t in &mesh.triangles[s..end] {
             let p = t.v.map(|i| mesh.positions[i as usize]);
             let clip = p.map(|p| apply(&v.map, p));
+            if shading == Shading::Rendered {
+                e.tri(clip.map(|p| Vertex { p, c: [0.0; 3] }), v.id, Some(KEY));
+                continue;
+            }
             let base = match shading {
                 Shading::Shaded => {
                     let m = if v.per_tri { t.material } else { d.material };
@@ -237,7 +248,7 @@ pub fn render(
     };
     raster.draw(
         target,
-        BACKGROUND,
+        if shading == Shading::Rendered { KEY } else { BACKGROUND },
         &[
             Pass { jobs: tri_jobs.len(), run: &tris },
             Pass { jobs: edge_jobs.len() + 1, run: &lines },

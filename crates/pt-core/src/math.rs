@@ -96,6 +96,17 @@ impl Index<usize> for Vec3 {
     }
 }
 
+impl std::ops::IndexMut<usize> for Vec3 {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut f32 {
+        match i {
+            0 => &mut self.x,
+            1 => &mut self.y,
+            _ => &mut self.z,
+        }
+    }
+}
+
 macro_rules! impl_binop {
     ($tr:ident, $f:ident, $atr:ident, $af:ident, $op:tt) => {
         impl $tr for Vec3 {
@@ -310,6 +321,14 @@ impl Transform {
     pub fn from_matrix(m: Mat3, t: Vec3) -> Result<Transform, String> {
         let inv = m.inverse().ok_or("transform is degenerate (zero scale?)")?;
         Ok(Transform { m, t, inv, normal_m: inv.transpose() })
+    }
+    /// The transform undoing this one.
+    pub fn inverse(&self) -> Transform {
+        Transform { m: self.inv, t: -self.inv.mul_vec(self.t), inv: self.m, normal_m: self.m.transpose() }
+    }
+    /// The translation by `t`.
+    pub fn translation(t: Vec3) -> Transform {
+        Transform { t, ..Transform::IDENTITY }
     }
     /// `self` followed by `outer`.
     pub fn then(&self, outer: &Transform) -> Transform {

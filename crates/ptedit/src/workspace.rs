@@ -3,15 +3,23 @@
 //! Headless uses (`--snapshot`, tests) drive it directly.
 
 use crate::display::Display;
+use crate::gizmo::Decor;
 use crate::overlay::{self, LIGHT_ID, Overlays, Selection};
 use crate::paint::{self, Canvas};
+use crate::ptview::PtView;
 use crate::raster::{Raster, Target};
-use crate::render::{self, Shading, Stats};
+use crate::render::{self, BACKGROUND, KEY, Shading, Stats};
 use crate::view::{View, ViewKind, sphere};
 use pt_core::document::SceneDoc;
 use pt_core::geometry::Aabb;
+use pt_core::lights::Light;
+use pt_core::math::{Mat3, Transform, Vec3};
+use pt_core::renderer::Region;
 use pt_core::scene::Scene;
+use pt_core::toml::{Seg, Value};
+use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// The four views, in the order the quad layout shows them (left to right, top to bottom).
@@ -39,7 +47,10 @@ impl Rect {
 #[expect(clippy::struct_excessive_bools, reason = "independent view toggles")]
 pub struct Workspace {
     pub doc: SceneDoc,
-    pub scene: Scene,
+    /// Shared with the path-traced view's thread; changed in place through `scene_mut`.
+    pub scene: Arc<Scene>,
+    /// Bumped whenever `scene` changes (the path-traced view restarts).
+    pub scene_gen: u64,
     pub display: Display,
     pub views: [View; 4],
     /// Four views, or the perspective view alone.
@@ -64,6 +75,32 @@ pub struct Workspace {
     pub labels: Vec<overlay::Label>,
     /// Why the document does not load (the views show the last scene that did).
     pub load_error: Option<String>,
+    /// The perspective view path traced.
+    pub rendered: bool,
+    pub pt: PtView,
+    /// The part of the perspective view the path tracer renders (0..1 of its width and
+    /// height: x0, y0, x1, y1); None for all of it.
+    pub region: Option<[f32; 4]>,
+    /// The perspective view looks through the scene camera; with `lock_camera` moving the
+    /// view moves the camera.
+    pub through_camera: bool,
+    pub lock_camera: bool,
+    /// Gizmos, handles and helper lines, drawn in every view.
+    pub decor: Decor,
+    /// The background's `rotate` as loaded, and as being dragged (shown before reloading).
+    pub env_loaded: Vec3,
+    pub env_preview: Option<Vec3>,
+}
+
+/// A `rotate` value of `[background]`: a number turns about +Y.
+pub fn env_rotation(v: Option<&Value>) -> Vec3 {
+    match v {
+        Some(Value::Number(n)) => Vec3::new(0.0, *n as f32, 0.0),
+        Some(v) => {
+            crate::xform::read_vec(&[("r".to_owned(), v.clone())].into_iter().collect(), "r").unwrap_or(Vec3::ZERO)
+        }
+        None => Vec3::ZERO,
+    }
 }
 
 /// A scene with nothing in it.
@@ -96,10 +133,12 @@ impl Workspace {
         let views = KINDS.map(|k| View::new(k, &scene.camera, &display.bounds));
         let sel = Selection::new(scene.provenance.objects.len(), scene.provenance.lights.len());
         let hidden = sel.clone();
+        let env_loaded = env_rotation(background_rotate(&doc).as_ref());
         Ok(Workspace {
             hidden,
             doc,
-            scene,
+            scene: Arc::new(scene),
+            scene_gen: 0,
             display,
             views,
             quad: false,
@@ -116,6 +155,14 @@ impl Workspace {
             labels_apart: false,
             labels: Vec::new(),
             load_error,
+            rendered: false,
+            pt: PtView::default(),
+            region: None,
+            through_camera: false,
+            lock_camera: false,
+            decor: Decor::default(),
+            env_loaded,
+            env_preview: None,
         })
     }
 
@@ -130,8 +177,43 @@ impl Workspace {
             self.sel = Selection::new(objects, lights);
             self.hidden = Selection::new(objects, lights);
         }
-        self.scene = scene;
+        self.scene = Arc::new(scene);
+        self.scene_gen += 1;
+        self.env_loaded = env_rotation(background_rotate(&self.doc).as_ref());
+        self.env_preview = None;
         Ok(())
+    }
+
+    /// The scene, to change in place: the path-traced view lets go of it first.
+    pub fn scene_mut(&mut self) -> &mut Scene {
+        self.pt.release();
+        self.scene_gen += 1;
+        if Arc::get_mut(&mut self.scene).is_none() {
+            // Still shared (a render thread that did not stop in time): work on a fresh copy.
+            if let Ok(s) = self.doc.to_scene() {
+                self.scene = Arc::new(s);
+                self.display = Display::build(&self.scene);
+            }
+        }
+        Arc::get_mut(&mut self.scene).expect("the render thread released the scene")
+    }
+
+    /// Moves object `o` by `delta` in the scene and the display without loading the scene
+    /// again; false if that cannot be done (the caller reloads).
+    pub fn transform_object(&mut self, o: usize, delta: &Transform) -> bool {
+        if !self.scene_mut().transform_object(o, delta) {
+            return false;
+        }
+        self.display.transform_object(o, delta);
+        true
+    }
+
+    /// Replaces light entry `j` with the one `table` describes, without reloading.
+    pub fn update_light(&mut self, j: usize, table: &pt_core::toml::Table) -> bool {
+        match pt_core::loader::parse_light(table, "light") {
+            Ok(l) => self.scene_mut().set_light(j, l),
+            Err(_) => false,
+        }
     }
 
     /// Where each shown view goes in a `w`x`h` window.
@@ -176,17 +258,29 @@ impl Workspace {
             let proj = self.proj(r);
             let view = &self.views[r.view];
             let scale = render::label_scale(r.h);
+            let traced = self.rendered && view.kind == ViewKind::Perspective;
             let mut o = Overlays::default();
-            if self.grid {
+            if self.grid && !traced {
                 overlay::grid(&mut o, &proj, view.kind, view_target(&proj, view.kind));
             }
-            overlay::camera(&mut o, &proj, &self.scene, &self.display);
+            if !(self.through_camera && view.kind == ViewKind::Perspective) {
+                overlay::camera(&mut o, &proj, &self.scene, &self.display);
+            }
             overlay::lights(&mut o, &proj, &self.scene, &self.display, &self.sel, &self.hidden, scale);
             overlay::bounds(&mut o, &self.display, &self.sel, &self.hidden, self.all_bounds);
             overlay::axis_indicator(&mut o, &proj, scale);
+            crate::gizmo::draw_decor(&mut o, &self.decor, &proj);
             let mut label = view.kind.name().to_owned();
             if !view.is_fixed() {
                 label += if view.ortho { " ORTHO" } else { "" };
+                if self.through_camera {
+                    label = "CAMERA".into();
+                    label += if self.lock_camera { " (LOCKED)" } else { "" };
+                }
+                if traced {
+                    let (spp, done) = self.pt.progress();
+                    let _ = write!(label, ", RENDERED {spp} SPP{}", if done { " DONE" } else { "" });
+                }
             }
             let lw = paint::text_width(&label, scale);
             o.labels.push(overlay::Label { x: r.w as i32 - lw - 10, y: 8, text: label, color: 0xc8_c8_d0 });
@@ -199,12 +293,37 @@ impl Workspace {
                     self.labels.push(overlay::Label { x: cx, y: cy, ..l });
                 }
             }
+            let (sel, hidden) = (&self.sel, &self.hidden);
             let target = &mut self.targets[r.view];
             target.resize(r.w, r.h);
-            let (sel, hidden) = (&self.sel, &self.hidden);
-            let s = render::render(&mut self.raster, target, &self.display, &proj, self.shading, sel, hidden, &o);
+            // A render region: the raster view outside it.
+            let outside = match (traced, self.region) {
+                (true, Some(_)) => {
+                    let none = Overlays::default();
+                    render::render(&mut self.raster, target, &self.display, &proj, self.shading, sel, hidden, &none);
+                    Some(target.color.clone())
+                }
+                _ => None,
+            };
+            let shading = if traced { Shading::Rendered } else { self.shading };
+            let s = render::render(&mut self.raster, target, &self.display, &proj, shading, sel, hidden, &o);
             stats.triangles += s.triangles;
             stats.boxes += s.boxes;
+            if traced {
+                let region = self.region_px(r.w, r.h);
+                let camera = if self.through_camera { self.scene.camera.clone() } else { view.camera_desc() };
+                self.pt.update(&self.scene, self.scene_gen, camera, (r.w, r.h), region);
+                self.pt.refresh();
+                let target = &mut self.targets[r.view];
+                composite(target, &self.pt, region, outside.as_deref());
+            } else if self.shading == Shading::Shaded {
+                let rot = self.env_preview.filter(|&p| p != self.env_loaded).map(|p| {
+                    let loaded = Mat3::rotate_xyz(self.env_loaded);
+                    loaded.mul(&Mat3::rotate_xyz(p).transpose())
+                });
+                backdrop(&mut self.targets[r.view], &proj, &self.scene, rot);
+            }
+            let target = &self.targets[r.view];
             for y in 0..r.h {
                 let row = (r.y + y) * w + r.x;
                 out[row..row + r.w].copy_from_slice(&target.color[y * r.w..(y + 1) * r.w]);
@@ -320,9 +439,98 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// The render region in pixels of a `w`x`h` view.
+    pub fn region_px(&self, w: usize, h: usize) -> Region {
+        let Some([x0, y0, x1, y1]) = self.region else { return Region { x: 0, y: 0, w, h } };
+        // At least one pixel, inside the view.
+        let span = |a: f32, b: f32, n: usize| {
+            let n = n.max(1);
+            let lo = ((a.min(b).clamp(0.0, 1.0) * n as f32) as usize).min(n - 1);
+            let hi = ((a.max(b).clamp(0.0, 1.0) * n as f32).round() as usize).clamp(lo + 1, n);
+            (lo, hi - lo)
+        };
+        let ((x, w), (y, h)) = (span(x0, x1, w), span(y0, y1, h));
+        Region { x, y, w, h }
+    }
+}
+
+/// The background's `rotate` as written in the document.
+fn background_rotate(doc: &SceneDoc) -> Option<Value> {
+    doc.value(doc.tree.background?, &[Seg::from("background"), Seg::from("rotate")])
+}
+
+/// Puts the path-traced image where the key color is (inside the region); outside it,
+/// the raster image `outside` (when there is a region).
+fn composite(t: &mut Target, pt: &PtView, region: Region, outside: Option<&[u32]>) {
+    let ready = pt.region == region && pt.image.len() == region.w * region.h;
+    for y in 0..t.h {
+        for x in 0..t.w {
+            let i = y * t.w + x;
+            if t.color[i] != KEY {
+                continue;
+            }
+            let inside = x >= region.x && x < region.x + region.w && y >= region.y && y < region.y + region.h;
+            t.color[i] = match (inside, outside) {
+                (true, _) if ready => pt.image[(y - region.y) * region.w + (x - region.x)],
+                (false, Some(o)) => o[i],
+                _ => BACKGROUND,
+            };
+        }
+    }
+    if outside.is_some() {
+        // The region's frame.
+        let mut c = Canvas { px: &mut t.color, w: t.w, h: t.h };
+        let (x0, y0) = (region.x as i32, region.y as i32);
+        c.rect(x0, y0, x0 + region.w as i32 - 1, y0 + region.h as i32 - 1, 0xd0_a0_40);
+    }
+}
+
+/// The scene's environment behind the geometry (shaded views): what the background looks
+/// like and how it is turned. `rot` previews a rotation not loaded yet.
+fn backdrop(t: &mut Target, proj: &crate::view::Proj, scene: &Scene, rot: Option<Mat3>) {
+    let Some(env) = scene.lights().iter().find_map(|l| if let Light::Environment(e) = l { Some(e) } else { None })
+    else {
+        return;
+    };
+    if proj.ortho {
+        return;
+    }
+    let enc = pt_core::image::Encoder::new(scene.settings.exposure, scene.settings.tonemap);
+    let (w, h) = (t.w, t.h);
+    let rows: Vec<(usize, &mut [u32])> = t.color.chunks_mut(w.max(1)).enumerate().collect();
+    let depth = &t.depth;
+    let threads = std::thread::available_parallelism().map_or(4, usize::from);
+    let per = h.div_ceil(threads).max(1);
+    let mut rows = rows;
+    std::thread::scope(|s| {
+        while !rows.is_empty() {
+            let chunk: Vec<(usize, &mut [u32])> = rows.drain(..per.min(rows.len())).collect();
+            let enc = &enc;
+            s.spawn(move || {
+                for (y, row) in chunk {
+                    // Every other pixel, the gaps filled from the left (it is a blurry backdrop).
+                    let mut last = 0;
+                    for (x, p) in row.iter_mut().enumerate() {
+                        if depth[y * w + x] != 0.0 || *p != BACKGROUND {
+                            continue;
+                        }
+                        if x % 2 == 0 || x == 0 {
+                            let d = proj.ray(x as f32 + 0.5, y as f32 + 0.5).d;
+                            let d = rot.map_or(d, |m| m.mul_vec(d));
+                            last = enc.encode(env.eval(d));
+                        }
+                        *p = last;
+                    }
+                }
+            });
+        }
+    });
+}
+
 /// Where the grid centres itself: where the view's centre ray meets the grid plane, or a
 /// point ahead of the eye when it meets it behind or far away.
-fn view_target(proj: &crate::view::Proj, kind: ViewKind) -> pt_core::math::Vec3 {
+fn view_target(proj: &crate::view::Proj, kind: ViewKind) -> Vec3 {
     let n = overlay::grid_axis(kind);
     let ahead = if proj.ortho { proj.half_h } else { proj.half_h / proj.tan_half.max(1e-6) };
     let t = if proj.fwd[n].abs() > 1e-4 { -proj.eye[n] / proj.fwd[n] } else { -1.0 };

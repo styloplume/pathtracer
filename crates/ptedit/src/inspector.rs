@@ -53,8 +53,8 @@ impl Ctx {
     }
 }
 
-const IMAGES: &[&str] = &["png", "jpg", "jpeg", "hdr", "pfm", "exr", "tga", "bmp"];
-const MESHES: &[&str] = &["obj", "ply", "stl", "gltf", "glb"];
+pub const IMAGES: &[&str] = &["png", "jpg", "jpeg", "hdr", "pfm", "exr", "tga", "bmp", "ppm", "pgm"];
+pub const MESHES: &[&str] = &["obj", "ply", "stl", "gltf", "glb"];
 const ANY: &[&str] = &[];
 
 /// The files a path key takes.
@@ -204,10 +204,84 @@ impl Editor {
         col.indent(pad);
         col.w -= pad / 2;
         col.gap = self.ui.px(3.0);
+        self.inspector_extras(&mut col, t, &ctx);
         self.inspect_table(&mut col, &ctx, 0);
         col.space(rh);
         let bottom = col.y;
         self.ui.end_scroll(scroll, bottom);
+    }
+
+    /// What the inspector shows above the keys: a material's preview, the presets of
+    /// `[render]` and `[output]`, the camera's tools.
+    fn inspector_extras(&mut self, col: &mut Column, t: Target, ctx: &Ctx) {
+        let rh = self.ui.row_h();
+        let gap = self.ui.px(6.0);
+        let label_w = ((col.w as f32 * 0.38) as i32).clamp(self.ui.px(70.0), self.ui.px(150.0));
+        let dir = self.ws.doc.files[ctx.file].path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        let material = match t {
+            Target::Item(Kind::Material, _) => Some(ctx.table.clone()),
+            Target::Item(Kind::Object, _) => ctx.table.get("material").and_then(Value::as_table).cloned(),
+            _ => None,
+        };
+        if let Some(m) = material {
+            let size = col.w.min(self.ui.px(150.0));
+            let r = col.row(size);
+            let pr = Rect::new(r.x + (r.w - size) / 2, r.y, size, size);
+            self.probe("inspector:preview", pr);
+            self.preview_tile(pr, &m, &dir);
+            col.space(self.ui.px(4.0));
+        }
+        let combo = |ed: &mut Editor, col: &mut Column, label: &str, names: Vec<String>| -> Option<usize> {
+            let r = col.row(rh);
+            let (lr, vr) = r.split_left(label_w, gap);
+            ed.ui.label(lr, label, ed.ui.theme.accent);
+            ed.probe(format!("inspector:preset {label}"), vr);
+            ed.ui.combo(id_of(ID, ("preset", label)), vr, "choose…", &names, ed.ui.theme.text_dim)
+        };
+        match t {
+            Target::Section(Section::Render) => {
+                let names = crate::edit::RENDER_PRESETS.iter().map(|p| p.0.to_owned()).collect();
+                if let Some(i) = combo(self, col, "quality preset", names) {
+                    self.render_preset(i);
+                }
+                let names = crate::edit::SIZE_PRESETS.iter().map(|p| p.0.to_owned()).collect();
+                if let Some(i) = combo(self, col, "size preset", names) {
+                    self.size_preset(i);
+                }
+                col.space(self.ui.px(4.0));
+            }
+            Target::Section(Section::Output) => {
+                let names = crate::edit::OUTPUT_PRESETS.iter().map(|p| p.0.to_owned()).collect();
+                if let Some(i) = combo(self, col, "preset", names) {
+                    self.output_preset(i);
+                }
+                col.space(self.ui.px(4.0));
+            }
+            Target::Section(Section::Camera) => {
+                let r = col.row(rh);
+                let cells = r.columns(3, self.ui.px(4.0));
+                let through = if self.ws.through_camera { "Leave View" } else { "Look Through" };
+                if self.ui.button(id_of(ID, "cam-through"), cells[0], through) {
+                    self.run(crate::editor::Cmd::CameraView);
+                }
+                let lock = if self.ws.lock_camera { "Unlock" } else { "Lock to View" };
+                if self.ui.button(id_of(ID, "cam-lock"), cells[1], lock) {
+                    self.run(crate::editor::Cmd::LockCamera);
+                }
+                self.probe("inspector:pick focus", cells[2]);
+                if self.ui.button(id_of(ID, "cam-focus"), cells[2], "Pick Focus") {
+                    self.run(crate::editor::Cmd::PickFocus);
+                }
+                let r = col.row(rh);
+                let cam = &self.ws.scene.camera;
+                let fd = cam.focus_distance.unwrap_or_else(|| (cam.look_at - cam.position).length());
+                let mm = 12.0 / (cam.fov.to_radians() * 0.5).tan();
+                let text = format!("{mm:.0} mm (24 mm sensor) · focus at {fd:.3} · aperture {:.3}", cam.aperture);
+                self.ui.label(r, &text, self.ui.theme.text_dim);
+                col.space(self.ui.px(4.0));
+            }
+            _ => {}
+        }
     }
 
     /// The rows of a table: its type, its keys, and keys the format does not know.
@@ -489,8 +563,15 @@ impl Editor {
                         );
                         Edit::None
                     }
-                    Some(Value::String(_)) => {
+                    Some(Value::String(s)) => {
                         let (br, fr) = vr.split_right(rh, self.ui.px(3.0));
+                        // The image's thumbnail before its name.
+                        let (tr, fr) = fr.split_left(rh, self.ui.px(3.0));
+                        let base =
+                            self.ws.doc.files[ctx.file_of(key.name)].path.parent().map(std::path::Path::to_path_buf);
+                        let file = base.unwrap_or_default().join(s);
+                        self.probe(probe_name(ctx, &format!("{} thumbnail", key.name)), tr);
+                        self.image_tile(tr, &file);
                         let e = self.string_field(id, fr, value, "image file");
                         if self.ui.button(id_of(id, "pick"), br, "…") {
                             return Edit::Pick(IMAGES);

@@ -33,6 +33,11 @@ impl SourceFile {
     pub fn is_dirty(&self) -> bool {
         self.doc.text() != self.saved
     }
+
+    /// The text on disk as last loaded or saved.
+    pub fn saved(&self) -> &str {
+        &self.saved
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -95,6 +100,8 @@ pub struct SceneDoc {
     /// While `group` runs: the merge key and label its edits share.
     group: Option<(String, String)>,
     groups: u64,
+    /// Bumped by every change of any file.
+    version: u64,
 }
 
 impl SceneDoc {
@@ -112,6 +119,7 @@ impl SceneDoc {
             history: History::default(),
             group: None,
             groups: 0,
+            version: 0,
         };
         doc.load_file(path, read)?;
         doc.rebuild(read)?;
@@ -274,6 +282,7 @@ impl SceneDoc {
     ) -> Result<bool, String> {
         let source = self.files.get_mut(file).ok_or_else(|| format!("no file #{file}"))?;
         let Some(splice) = f(&mut source.doc)? else { return Ok(false) };
+        self.version += 1;
         let (label, merge) = match &self.group {
             Some((key, label)) => (label.as_str(), Some(key.as_str())),
             None => (label, merge),
@@ -309,10 +318,38 @@ impl SceneDoc {
         self.edit(file, &label, None, |d| d.remove(path))
     }
 
+    /// Like `remove`, joining the undo step of edits with the same `merge` key.
+    pub fn remove_merging(&mut self, file: usize, path: &[Seg], merge: &str) -> Result<bool, String> {
+        let label = format!("remove {}", path_name(path));
+        self.edit(file, &label, Some(merge), |d| d.remove(path))
+    }
+
+    /// Bumped by every change of the files (edits, undo, redo, reloads).
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Appends a table to the array of tables at `path` (`["objects"]`) of file `file`.
     pub fn push_table(&mut self, file: usize, path: &[Seg], entries: &[(String, Value)]) -> Result<bool, String> {
         let label = format!("add to {}", path_name(path));
         self.edit(file, &label, None, |d| d.push_table(path, entries))
+    }
+
+    /// Adds `block` (sections such as `block_text` gives) to file `file`, after the last
+    /// element of the array of tables at `path` (else at the end of the file).
+    pub fn insert_block(&mut self, file: usize, path: &[Seg], block: &str) -> Result<bool, String> {
+        let label = format!("add to {}", path_name(path));
+        self.edit(file, &label, None, |d| d.insert_sections(path, block))
+    }
+
+    /// Takes the text of file `file` on disk (changed by another program) as an undoable
+    /// edit; returns whether it differed. The file is then not dirty.
+    pub fn reload_file(&mut self, file: usize) -> Result<bool, String> {
+        let path = self.files.get(file).ok_or_else(|| format!("no file #{file}"))?.path.clone();
+        let text = loader::read_file(&path)?;
+        let changed = self.edit(file, "change on disk", None, |d| d.replace_text(text.clone()))?;
+        self.files[file].saved = text;
+        Ok(changed)
     }
 
     /// Ends the current merged edit.
@@ -402,6 +439,7 @@ impl SceneDoc {
     /// Reverts the last undo step; returns whether there was one.
     pub fn undo(&mut self) -> Result<bool, String> {
         let Some(cmd) = self.history.pop_undo() else { return Ok(false) };
+        self.version += 1;
         for c in cmd.changes.iter().rev() {
             self.files[c.file].doc.apply(&c.splice.inverse())?;
         }
@@ -412,6 +450,7 @@ impl SceneDoc {
     /// Makes the last undone step again.
     pub fn redo(&mut self) -> Result<bool, String> {
         let Some(cmd) = self.history.pop_redo() else { return Ok(false) };
+        self.version += 1;
         for c in &cmd.changes {
             self.files[c.file].doc.apply(&c.splice)?;
         }

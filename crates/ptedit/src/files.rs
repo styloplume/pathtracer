@@ -114,16 +114,25 @@ impl FileDialog {
         Outcome::Chosen(path)
     }
 
-    /// Draws the dialog; returns what the user did.
-    pub fn ui(&mut self, ui: &mut Ui) -> Outcome {
+    /// Whether the files listed are images (shown with thumbnails).
+    fn images(&self) -> bool {
+        self.exts.iter().any(|e| e == "png" || e == "hdr")
+    }
+
+    /// Draws the dialog; returns what the user did. Image files show thumbnails, made by
+    /// `lib`'s worker.
+    pub fn ui(&mut self, ui: &mut Ui, lib: &mut crate::library::Library) -> Outcome {
         let area = ui.begin_modal(&self.title, 620.0, 460.0);
-        let rh = ui.row_h();
+        let images = self.images();
+        lib.poll();
+        let rh = if images { ui.row_h() * 2 } else { ui.row_h() };
+        let row_h = ui.row_h();
         let gap = ui.px(6.0);
         let mut col = Column::new(area, gap);
         let mut out = Outcome::Open;
 
         // Folder: up, and the path (type another to go there).
-        let top = col.row(rh);
+        let top = col.row(row_h);
         let (up, path) = top.split_left(ui.px(60.0), gap);
         let typing = ui.edit.is_some();
         if (ui.button(id_of(ID, "up"), up, "Up") || (!typing && ui.take_key(pt_core::platform::Key::Backspace)))
@@ -142,7 +151,7 @@ impl FileDialog {
         }
 
         // The listing.
-        let bottom_h = 2 * rh + gap * 2 + if self.error.is_some() { rh } else { 0 };
+        let bottom_h = 2 * row_h + gap * 2 + if self.error.is_some() { row_h } else { 0 };
         let list_r = Rect::new(area.x, col.y, area.w, (area.bottom() - col.y - bottom_h).max(rh));
         ui.fill(list_r, ui.theme.field);
         ui.border(list_r, ui.theme.border, 0);
@@ -156,6 +165,24 @@ impl FileDialog {
             }
             let label = if e.dir { format!("{}/", e.name) } else { e.name.clone() };
             let color = if e.dir { ui.theme.text } else { ui.theme.text_dim };
+            let r = if images {
+                // The thumbnail at the left, the name beside it.
+                let (tr, rest) = r.split_left(rh, ui.px(4.0));
+                if !e.dir {
+                    let tr = tr.shrink(2);
+                    if let Some(t) = lib.image(&self.dir.join(&e.name), tr.w.max(8) as usize).cloned() {
+                        let (w, h) = (t.w as i32, t.h as i32);
+                        let at = Rect::new(tr.x + (tr.w - w).max(0) / 2, tr.y + (tr.h - h).max(0) / 2, w, h);
+                        ui.image(at, t.w, t.h, t.px);
+                    } else {
+                        ui.fill(tr, ui.theme.panel);
+                        ui.repaint_after(std::time::Duration::from_millis(60));
+                    }
+                }
+                rest
+            } else {
+                r
+            };
             let t = ui.tree_row(id_of(sid, i), r, 0, None, self.selected == Some(i), &label, "", color);
             if t.resp.clicked || t.resp.pressed {
                 self.selected = Some(i);
@@ -184,10 +211,10 @@ impl FileDialog {
         col.y = list_r.bottom() + gap;
 
         if let Some(err) = self.error.clone() {
-            let r = col.row(rh);
+            let r = col.row(row_h);
             ui.label(r, &err, ui.theme.error);
         }
-        let name_r = col.row(rh);
+        let name_r = col.row(row_h);
         let (label, field) = name_r.split_left(ui.px(80.0), gap);
         ui.label(label, "File name", ui.theme.text_dim);
         if let Some(t) = ui.text_field(id_of(ID, "name"), field, &self.name.clone(), "") {
@@ -197,7 +224,7 @@ impl FileDialog {
                 out = self.choose();
             }
         }
-        let buttons = col.row(rh);
+        let buttons = col.row(row_h);
         let bw = ui.px(96.0);
         let (ok_r, rest) = buttons.split_right(bw, gap);
         let (cancel_r, _) = rest.split_right(bw, gap);

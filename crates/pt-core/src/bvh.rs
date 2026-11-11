@@ -144,6 +144,30 @@ impl Bvh {
         self.depth
     }
 
+    /// Recomputes every box from the leaves up after primitives moved, keeping the tree
+    /// (`bounds(index)` gives the new bounds of a value of `indices`). Much cheaper than a
+    /// rebuild; the tree gets worse the further things move from where it was built.
+    pub fn refit(&mut self, bounds: impl Fn(u32) -> Aabb) {
+        // Children always come after their parent, so back to front visits them first.
+        for n in (0..self.nodes.len()).rev() {
+            for i in 0..4 {
+                let (child, count) = (self.nodes[n].child[i], self.nodes[n].count[i]);
+                let b = if count > 0 {
+                    let mut b = Aabb::EMPTY;
+                    for &p in &self.indices[child as usize..(child + count) as usize] {
+                        b.grow(&bounds(p));
+                    }
+                    b
+                } else if child != 0 {
+                    self.nodes[child as usize].bounds()
+                } else {
+                    continue; // an unused slot (the root is never a child)
+                };
+                self.nodes[n].set(i, &b, child, count);
+            }
+        }
+    }
+
     /// Fills `nodes[at]` with up to four children of `node` (an interior node), opening
     /// the largest interior children first. Returns the depth of the subtree.
     fn flatten(&mut self, node: &BuildNode, at: usize) -> usize {
@@ -409,6 +433,35 @@ mod tests {
         sorted.sort_unstable();
         assert!(sorted.iter().enumerate().all(|(i, &v)| i as u32 == v), "indices are a permutation");
         assert!(bvh.depth() < 40, "depth {}", bvh.depth());
+        agrees_with_brute_force(&bvh, &boxes, &mut rng);
+    }
+
+    /// Moving a third of the boxes far away and refitting finds them where they went.
+    #[test]
+    fn refit_follows_moved_primitives() {
+        let mut rng = Rng::new(3, 9);
+        let mut boxes: Vec<Aabb> = (0..3000)
+            .map(|_| {
+                let c = Vec3::new(rng.f32() * 100.0, rng.f32() * 100.0, rng.f32() * 100.0);
+                Aabb { min: c - Vec3::splat(0.4), max: c + Vec3::splat(0.4) }
+            })
+            .collect();
+        let mut bvh = Bvh::build(&boxes);
+        for b in boxes.iter_mut().step_by(3) {
+            let d = Vec3::new(37.0, -20.0, 11.0);
+            *b = Aabb { min: b.min + d, max: b.max + d + Vec3::splat(0.7) };
+        }
+        bvh.refit(|p| boxes[p as usize]);
+        let mut all = Aabb::EMPTY;
+        for b in &boxes {
+            all.grow(b);
+        }
+        assert_eq!((bvh.bounds().min, bvh.bounds().max), (all.min, all.max));
+        agrees_with_brute_force(&bvh, &boxes, &mut rng);
+    }
+
+    fn agrees_with_brute_force(bvh: &Bvh, boxes: &[Aabb], rng: &mut Rng) {
+        let n = boxes.len();
         for _ in 0..300 {
             let o = Vec3::new(rng.f32() * 120.0 - 10.0, rng.f32() * 120.0 - 10.0, -5.0);
             let target = Vec3::new(rng.f32() * 100.0, rng.f32() * 100.0, rng.f32() * 100.0);

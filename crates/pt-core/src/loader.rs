@@ -456,7 +456,7 @@ fn from_angles(elevation: f32, azimuth: f32) -> Vec3 {
 }
 
 /// `[[lights]]`: point, spot and directional lights.
-fn parse_light(t: &Table, ctx: &str) -> Result<Light, String> {
+pub fn parse_light(t: &Table, ctx: &str) -> Result<Light, String> {
     let ty = str_opt(t, "type", ctx)?.ok_or_else(|| format!("{ctx}: missing 'type'"))?;
     let color = light_color(t, ctx)?;
     let intensity = f32_or(t, "intensity", 1.0, ctx)?;
@@ -1275,6 +1275,55 @@ translate = [-5, 0, -5]
         assert_eq!(pick(5.0, 0.0), Some(1));
         assert_eq!(pick(-5.0, 0.0), Some(3));
         assert_eq!(pick(20.0, 0.0), None);
+    }
+
+    /// Moving objects in place (the editor's drags) gives the scene that loading the moved
+    /// objects gives: every ray hits the same object at the same distance.
+    #[test]
+    fn transformed_objects_match_reloaded_ones() {
+        let objects = |moved: bool| {
+            let t = |x: f32| {
+                if moved {
+                    format!("translate = [{}, 1, 0]\nrotate = [0, 30, 0]\n", x + 0.5)
+                } else {
+                    format!("translate = [{x}, 0, 0]\n")
+                }
+            };
+            format!(
+                "[materials.lamp]\ntype = \"light\"\n[prototypes.p]\ntype = \"sphere\"\nradius = 0.5\n\
+                 [[objects]]\ntype = \"quad\"\norigin = [-0.5, -0.5, 0]\nu = [1, 0, 0]\nv = [0, 1, 0]\nmaterial = \"lamp\"\n{}\
+                 [[objects]]\ntype = \"box\"\nsize = [1, 0.5, 0.8]\n{}\
+                 [[objects]]\ntype = \"instance\"\nprototype = \"p\"\n{}\
+                 [[objects]]\ntype = \"sphere\"\nradius = 0.4\n",
+                t(-3.0),
+                t(0.0),
+                t(3.0)
+            )
+        };
+        let load = |src: String| load_scene_from(Path::new("t.toml"), &move |_| Ok(src.clone())).unwrap();
+        let mut a = load(objects(false));
+        let b = load(objects(true));
+        let delta = |x: f32| {
+            let old = crate::math::Trs { translate: Vec3::new(x, 0.0, 0.0), ..crate::math::Trs::IDENTITY };
+            let new = crate::math::Trs {
+                translate: Vec3::new(x + 0.5, 1.0, 0.0),
+                rotate: Vec3::new(0.0, 30.0, 0.0),
+                ..crate::math::Trs::IDENTITY
+            };
+            old.transform().unwrap().inverse().then(&new.transform().unwrap())
+        };
+        for (o, x) in [(0, -3.0), (1, 0.0), (2, 3.0)] {
+            assert!(a.transform_object(o, &delta(x)), "object {o}");
+        }
+        assert_eq!(a.lights().len(), b.lights().len(), "the emitter's area lights follow");
+        let mut rng = crate::rng::Rng::new(1, 2);
+        for _ in 0..2000 {
+            let o = Vec3::new(rng.f32() * 10.0 - 5.0, rng.f32() * 3.0 - 1.0, 6.0);
+            let ray = crate::math::Ray::new(o, Vec3::new(rng.f32() * 0.2 - 0.1, 0.0, -1.0).normalize(), 0.0);
+            let ha = a.intersect(&ray, f32::INFINITY).map(|h| (a.object_of(h.prim, h.inst), (h.t * 1e3).round()));
+            let hb = b.intersect(&ray, f32::INFINITY).map(|h| (b.object_of(h.prim, h.inst), (h.t * 1e3).round()));
+            assert_eq!(ha, hb, "ray from {o:?}");
+        }
     }
 
     #[test]

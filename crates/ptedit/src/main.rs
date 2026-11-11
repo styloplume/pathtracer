@@ -4,20 +4,29 @@
 //! immediate-mode UI toolkit. Edits keep the files' formatting and can be undone.
 
 mod display;
+mod edit;
 mod editor;
 #[cfg(test)]
 mod editor_tests;
 mod files;
+mod gizmo;
 mod inspector;
+mod library;
 mod outliner;
 mod overlay;
 mod paint;
+mod ptview;
 mod raster;
 mod render;
 mod settings;
+mod tools;
+#[cfg(test)]
+mod tools_tests;
 mod ui;
 mod view;
+mod watch;
 mod workspace;
+mod xform;
 
 use editor::{Editor, Target};
 use pt_core::document::{Item, Kind, SceneDoc};
@@ -31,9 +40,11 @@ usage: ptedit <scene.toml>           open the scene in the editor
        ptedit --check <scene.toml>   print the scene's outline and problems, without a window
        ptedit --snapshot <scene.toml> <out.png> [--size WxH] [--quad] [--shading MODE]
                      [--select N]... [--frames N] [--ui] [--theme dark|light] [--scale S]
+                     [--rendered SPP]
                                      draw the viewport (with --ui: the whole editor) into a
                                      PNG, without a window (MODE: wire, solid, shaded,
-                                     wiresolid; N: object index)
+                                     wiresolid; N: object index; --rendered: path trace the
+                                     perspective view to SPP samples per pixel)
 
 the editor's keys (F1 shows them in the window):";
 
@@ -76,6 +87,7 @@ fn snapshot(path: &Path, out: &Path, opts: &[&str]) -> Result<(), String> {
     let mut ws = Workspace::open(path)?;
     let (mut w, mut h, mut frames) = (1280usize, 720usize, 1usize);
     let (mut with_ui, mut theme, mut scale) = (false, None, 1.0f32);
+    let mut rendered: Option<u32> = None;
     let mut it = opts.iter();
     while let Some(&o) = it.next() {
         let mut value = || it.next().copied().ok_or_else(|| format!("{o} needs a value"));
@@ -92,6 +104,10 @@ fn snapshot(path: &Path, out: &Path, opts: &[&str]) -> Result<(), String> {
                 ws.sel.set_id(i + 1, true);
             }
             "--frames" => frames = value()?.parse().map_err(|_| "--frames takes a count")?,
+            "--rendered" => {
+                rendered = Some(value()?.parse().map_err(|_| "--rendered takes samples per pixel")?);
+                ws.rendered = true;
+            }
             "--ui" => with_ui = true,
             "--theme" => theme = Some(value()?.to_owned()),
             "--scale" => scale = value()?.parse().map_err(|_| "--scale takes a number")?,
@@ -118,6 +134,11 @@ fn snapshot(path: &Path, out: &Path, opts: &[&str]) -> Result<(), String> {
         eprintln!("{w}x{h}: font {} at {} px", ed.ui.font.source, ed.ui.font.size);
         return pt_core::image::write_png(out, w, h, &pt_core::image::packed_to_rgb(&px))
             .map_err(|e| format!("cannot write '{}': {e}", out.display()));
+    }
+    if let Some(spp) = rendered {
+        // Start the render, wait for it, and draw what it made.
+        ws.compose(w, h);
+        ws.pt.wait_for(spp, std::time::Duration::from_secs(600));
     }
     let mut times = Vec::new();
     let mut px = Vec::new();

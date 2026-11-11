@@ -485,6 +485,49 @@ impl Document {
         self.splice(edits)
     }
 
+    /// The text of the sections that write the table at `path` (a `[[objects]]` element, a
+    /// `[materials.NAME]` section), comments above it included and blank lines after it
+    /// left out; None if it is not written as one block of sections.
+    pub fn block_text(&self, path: &[Seg]) -> Option<String> {
+        let node = self.get(path)?;
+        if !matches!(&node.kind, NodeKind::Table(t) if matches!(t.style, Style::Header { .. })) {
+            return None;
+        }
+        let mut r = Vec::new();
+        ranges(node, &mut r);
+        r.sort_by_key(|s| s.start);
+        if r.windows(2).any(|w| w[1].start > w[0].end) {
+            return None;
+        }
+        let (start, end) = (r.first()?.start, r.iter().map(|s| s.end).max()?);
+        Some(self.text[start..end].trim_end().to_owned())
+    }
+
+    /// Adds `block` (one or more sections, as `block_text` returns them) after the last
+    /// element of the array of tables at `path`, or at the end of the file if there is none,
+    /// with a blank line on either side. The text must parse where it lands.
+    pub fn insert_sections(&mut self, path: &[Seg], block: &str) -> Result<Option<Splice>, String> {
+        let at = match self.get(path).map(|n| &n.kind) {
+            Some(NodeKind::TableArray(items)) => items.last().and_then(blocks_end).unwrap_or(self.text.len()),
+            _ => self.text.len(),
+        };
+        let nl = self.newline();
+        let before = &self.text[..at];
+        let lead = if before.trim().is_empty() || before.ends_with("\n\n") || before.ends_with("\n\r\n") {
+            ""
+        } else if before.ends_with('\n') {
+            nl
+        } else {
+            "\n\n"
+        };
+        let lead = if lead == "\n\n" { format!("{nl}{nl}") } else { lead.to_owned() };
+        let after = &self.text[at..];
+        let blank_after = !after.is_empty() && !after.starts_with('\n') && !after.starts_with("\r\n");
+        let body = block.trim_end().replace("\r\n", "\n").replace('\n', nl);
+        let s = format!("{lead}{body}{nl}{}", if blank_after { nl } else { "" });
+        self.splice(vec![(at..at, s)])
+    }
+
     /// Moves element `from` of the array (or array of tables) at `path` to position `to`.
     pub fn move_item(&mut self, path: &[Seg], from: usize, to: usize) -> Result<Option<Splice>, String> {
         let node = self.get(path).ok_or_else(|| format!("'{}' does not exist", path_name(path)))?;

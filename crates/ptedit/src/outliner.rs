@@ -326,6 +326,17 @@ impl Editor {
                 if matches!(kind, Kind::Light | Kind::Object | Kind::Material) {
                     self.ui.drag_source(&resp, payload(kind, i), &row.label);
                 }
+                // A material from the library dropped on an object.
+                if kind == Kind::Object
+                    && let Some(p) = self.ui.drag_over(main).filter(|p| p >> 32 == crate::library::LIB_TAG)
+                {
+                    self.ui.border(main, self.ui.theme.drop_target, 0);
+                    if self.ui.dropped(main).is_some()
+                        && let Some(name) = self.material_payload(p)
+                    {
+                        self.assign_material_name(i, &name);
+                    }
+                }
                 if let Some(p) = self.ui.drag_over(main).and_then(unpack)
                     && p != (kind, i)
                 {
@@ -369,6 +380,19 @@ impl Editor {
                         }
                         if self.ui.menu_item(&mut f, "Move Down", "", down) {
                             self.move_entry(kind, i, i + 1);
+                        }
+                        if self.ui.menu_item(&mut f, "Duplicate", "Ctrl+D", true) {
+                            self.select_target(target, false, false);
+                            self.duplicate();
+                        }
+                    }
+                    self.ui.menu_separator(&mut f);
+                    if self.ui.menu_item(&mut f, "Delete", "", true) {
+                        if matches!(kind, Kind::Light | Kind::Object) {
+                            self.select_target(target, false, false);
+                            self.delete_selection();
+                        } else {
+                            self.delete_item(kind, i);
                         }
                     }
                     self.ui.end_popup(f);

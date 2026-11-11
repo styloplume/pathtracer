@@ -62,10 +62,46 @@ system font (or a built-in bitmap font).
 - Theme (dark / light), panel widths, layout and recent files are kept per user in `settings.toml` in the user's
   configuration folder (`PTEDIT_SETTINGS` names another file).
 
+Scene editing:
+
+- **Add** (menu, or `Shift+A` under the mouse) primitives, a mesh file, an instance of a prototype, or a light: placed
+  on the surface under the cursor (else on the ground plane), at a size that suits the view. `Delete`, `Ctrl+D`
+  duplicate (comments and all), `Ctrl+C` / `Ctrl+X` / `Ctrl+V` copy, cut and paste, also between scenes: the
+  clipboard holds the entries as TOML with the materials and prototypes they use, and file paths are rewritten to
+  work from the other scene's folder.
+- **Gizmos** (`W` move, `E` rotate, `R` scale, `Q` none; `T` world / local axes): arrows, planes and a view-plane
+  square; rings and a view ring; axes and a uniform square. While dragging, type a number (a distance, degrees or a
+  factor), press `X` / `Y` / `Z` (with `Shift`: the plane) to change the axis, `Ctrl` to toggle snapping, `Enter` to
+  keep, `Esc` to cancel. Snapping (`N`): the grid's lines with 15° and 0.1 steps, vertices of other objects, or the
+  surface under the cursor.
+- Changes are written as the file already writes them: a sphere placed by its `center` has its center moved, a box
+  given by `min` / `max` has both moved, others get `translate`; rotations become `rotate` angles close to the old
+  ones, a uniform `scale` stays one number; lights get `position`, `direction` / `look_at` or `elevation` / `azimuth`.
+  Moving things does not load the scene again: the geometry moves in place and the BVHs are refitted.
+- **Handles**: a spot light's cone and inner cone and where it points; the sun of a directional light or of the sky
+  (with the background selected) dragged on the sky dome; the faces of an instance's `scatter` box; the camera's
+  focus plane. The environment backdrop of the shaded view previews `[background] rotate` while it is dragged.
+- **Camera**: `C` looks through the scene camera (the rest of the view is dimmed outside its image), `Shift+C`
+  locks it to the view so that navigating moves the camera; `Ctrl+F` and a click sets the focus distance; the camera's
+  inspector shows focal length, focus and aperture and draws the focus plane.
+- **Materials** tab: the scene's materials and those of `lib/*.toml` files near the scene (such as
+  `scenes/lib/materials.toml`), each with a small path-traced preview; drag one onto an object in the viewport or the
+  outliner (a library material is copied into the scene file), double-click to give it to the selection. The
+  inspector shows a preview of the material being edited and thumbnails of texture images; the file browser shows
+  thumbnails of images.
+- `Ctrl+P` turns the selection into a prototype (placed by one instance where the objects were); `[render]` and
+  `[output]` have presets in the inspector.
+- **Path-traced view** (`P`): the tracer's progressive renderer draws the perspective view, restarted on every change,
+  with the gizmos and the selection outline on top; `Ctrl+B` drags a render region, `Ctrl+Alt+B` clears it.
+- **Hot reload**: a scene file changed by another program comes in as an undoable edit (the editor asks first if it
+  has unsaved changes there); changed meshes and textures reload the scene. `F5` opens the scene in the tracer's
+  window, which reloads it whenever the editor saves.
+
 Clicking in the viewport picks through the tracer's BVH. `ptedit --snapshot scene.toml out.png [--size WxH] [--quad]
-[--shading wire|solid|shaded|wiresolid] [--select N] [--frames N]` draws the viewport into a PNG without a window
-and prints the frame time; `--ui [--theme dark|light] [--scale S]` draws the whole editor window instead. Planned work
-is in [`EDITOR_ROADMAP.md`](EDITOR_ROADMAP.md).
+[--shading wire|solid|shaded|wiresolid] [--select N] [--frames N] [--rendered SPP]` draws the viewport into a PNG
+without a window and prints the frame time (`--rendered`: path traced to SPP samples per pixel); `--ui [--theme
+dark|light] [--scale S]` draws the whole editor window instead. Planned work is in
+[`EDITOR_ROADMAP.md`](EDITOR_ROADMAP.md).
 
 | Input | Action |
 |---|---|
@@ -133,7 +169,14 @@ is in [`EDITOR_ROADMAP.md`](EDITOR_ROADMAP.md).
 | `crates/ptedit/src/editor.rs` | the editor window: panel layout, menus, status bar, viewport input, commands and shortcuts, dialogs, the event loop |
 | `crates/ptedit/src/outliner.rs` | the outliner: tree of sections and items, select, rename, reorder, drag and drop, show / hide |
 | `crates/ptedit/src/inspector.rs` | the inspector, generated from the schema: a widget per key type, defaults, aliases, problems |
-| `crates/ptedit/src/files.rs` | in-app file browser (open, save as, pick files) |
+| `crates/ptedit/src/files.rs` | in-app file browser (open, save as, pick files), with image thumbnails |
+| `crates/ptedit/src/edit.rs` | editing commands: add under the cursor, delete, duplicate, copy / paste between scenes, make a prototype, assign and import materials, presets |
+| `crates/ptedit/src/xform.rs` | placements and how moves, rotations and scales are written back in each item's own keys |
+| `crates/ptedit/src/gizmo.rs` | transform gizmos and handles: drawing and hit testing |
+| `crates/ptedit/src/tools.rs` | gizmo and handle drags, snapping, typed values, click-to-focus, render region, camera locked to the view |
+| `crates/ptedit/src/ptview.rs` | the path-traced view: the progressive renderer on its own thread, restarted on changes |
+| `crates/ptedit/src/library.rs` | the Materials tab and its path-traced previews, image thumbnails (a worker thread) |
+| `crates/ptedit/src/watch.rs` | hot reload: files changed by other programs |
 | `crates/ptedit/src/settings.rs` | per-user settings: theme, font, layout, recent files |
 | `crates/ptedit/src/ui/` | immediate-mode UI toolkit: ids, hot / active / focus, layers (popups, modals, tooltips), scrolling, widgets, themes, TrueType reader and rasterizer, 8×8 bitmap font |
 | `crates/ptedit/src/workspace.rs` | the editor's state: document, scene, views and layout, selection, picking; draws all views |

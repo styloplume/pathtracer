@@ -103,24 +103,49 @@ crates/
 
 ## E3 — Scene editing
 
-- [ ] Create every primitive and light from a menu or shortcut, placed under the cursor on the surface or the
+- [x] Create every primitive and light from a menu or shortcut, placed under the cursor on the surface or the
   ground plane; delete, duplicate, copy / paste between scenes
-- [ ] Transform gizmos (move / rotate / scale) in world or local space, with numeric entry while dragging;
+- [x] Transform gizmos (move / rotate / scale) in world or local space, with numeric entry while dragging;
   snapping to grid, angle steps, vertices and surfaces
-- [ ] Editing that writes back as `translate` / `rotate` / `scale` in the scene's own conventions
-- [ ] Lights: point / spot / directional helpers with editable cone angles and handles; drag the sun on the sky
+- [x] Editing that writes back as `translate` / `rotate` / `scale` in the scene's own conventions
+- [x] Lights: point / spot / directional helpers with editable cone angles and handles; drag the sun on the sky
   dome; environment rotation preview
-- [ ] Camera: "look through camera", lock the viewport to the camera, focal length / f-stop / focus distance
+- [x] Camera: "look through camera", lock the viewport to the camera, focal length / f-stop / focus distance
   with a focus plane overlay, and click-to-focus
-- [ ] Materials: library browser (including `scenes/lib/materials.toml`), assign by drag and drop, a material editor
+- [x] Materials: library browser (including `scenes/lib/materials.toml`), assign by drag and drop, a material editor
   with a small path-traced preview sphere, texture pickers with thumbnails
-- [ ] Prototypes and instances: turn the selection into a prototype, place instances, edit `scatter` parameters
+- [x] Prototypes and instances: turn the selection into a prototype, place instances, edit `scatter` parameters
   with a live preview of the scatter box
-- [ ] Media and render settings editable in the inspector; `[output]` and `[render]` presets
-- [ ] Path-traced viewport: the progressive renderer in a viewport pane, restarted on edits; BVH refit (not
+- [x] Media and render settings editable in the inspector; `[output]` and `[render]` presets
+- [x] Path-traced viewport: the progressive renderer in a viewport pane, restarted on edits; BVH refit (not
   rebuild) for transform-only changes; region render; switching between raster and rendered views
-- [ ] Hot-reload both ways: the editor picks up changes to files saved outside it, and the tracer window keeps
+- [x] Hot-reload both ways: the editor picks up changes to files saved outside it, and the tracer window keeps
   working beside the editor as it does today
+- How E3 turned out: things are added from an Add menu (`Shift+A` at the mouse) on the surface under the cursor,
+  found by tracing, with its normal from two neighbouring rays, else on the ground plane, at a size of about 60 pixels
+  rounded to 1, 2 or 5. Duplicates and pastes copy the entries' text (`Document::block_text` / `insert_sections`), so
+  comments come along. The clipboard is TOML: the entries, the materials and prototypes they name, and file paths
+  made absolute (made relative again where they are pasted). Gizmos are drawn as screen lines at a constant size.
+  Moves keep the file's own form: a point key (`center`, `base`, `origin`, `position`) is moved when the object has no
+  transform, a box's `min` / `max` both, else `translate`. A rotation or scale of an object placed by its point folds
+  that point into `translate` first, so it turns about itself (`center = c` becomes `translate = c`, `rotate = ...`).
+  Rotations are written as `rotate` angles; of the two angle sets for a rotation, the one closer to the old angles is
+  chosen (no jumps from 179 to -179). Scaling is always along the item's own axes, which is what `scale` can say.
+  During a drag the edits are rewritten from the tables as they were at the start, and the scene is changed in place:
+  `Scene::transform_object` moves world geometry, puts the change on top of instances, and refits the BVHs
+  (`Bvh::refit`); lights are replaced (`Scene::set_light`). Scatter instances (whose copies the loader places by
+  adding angles, which a refit does not reproduce) are loaded again when the drag ends, and a change a refit cannot
+  express (a sphere scaled unevenly) loads the scene on every step. The sky's sun loads the scene as it is dragged
+  (the sky is rebuilt); the environment's `rotate` is previewed by the shaded view's backdrop and loaded when let go.
+  The path-traced view renders the perspective view on its own thread (`renderer::render_region` gained regions);
+  surfaces are drawn in a key color that the traced image replaces, so the selection outline, light icons and gizmos
+  stay on top. Looking through the camera draws the view with the camera's pose and field of view (fisheye and
+  panoramic cameras show as perspective there) and dims what is outside its image; the traced view then uses the
+  camera itself, with its depth of field. Material previews render a sphere on a checkered floor at 24-48 samples on
+  a worker thread (media are left out); library files are the `lib/*.toml` (and `scenes/lib/*.toml`) beside the scene
+  and up to three folders above. Hot reload polls modification times twice a second; the editor's own saves are
+  recognised by their text. Media and render settings were editable in the inspector since E2; E3 adds the presets.
+  `ptedit --snapshot ... --rendered SPP` draws the traced view headless.
 
 ## E4 — Polygon modeling
 

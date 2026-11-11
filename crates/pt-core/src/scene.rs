@@ -444,6 +444,103 @@ impl Scene {
         inside.then_some(i)
     }
 
+    /// Moves the geometry of `[[objects]]` entry `object` by `delta` (applied after its
+    /// current placement) without rebuilding the acceleration structures: world geometry is
+    /// transformed in place, the instances it placed get `delta` on top, and the BVHs are
+    /// refitted. Returns false, changing nothing, when that cannot represent the result
+    /// (a shape the transform would turn into another kind, moving instances): the caller
+    /// then loads the scene again.
+    pub fn transform_object(&mut self, object: usize, delta: &Transform) -> bool {
+        let Some(span) = self.provenance.objects.get(object).cloned() else { return false };
+        let placed: Vec<usize> = (0..self.instances.len())
+            .filter(|&k| self.instance_origin[k] != WORLD && span.instances.contains(&self.instance_origin[k]))
+            .collect();
+        if placed.iter().any(|&k| matches!(self.instances[k].xf, InstanceXf::Motion(..))) {
+            return false;
+        }
+        // The object's own geometry groups (moving objects) are placed, not moved.
+        let own: std::collections::HashSet<u32> =
+            placed.iter().flat_map(|&k| self.blas[self.instances[k].group as usize].indices.iter().copied()).collect();
+        let nt = self.triangles.len() as u32;
+        let tris: Vec<u32> = span.triangles.clone().filter(|t| !own.contains(t)).collect();
+        let shapes: Vec<u32> = span.shapes.clone().filter(|s| !own.contains(&(nt + s))).collect();
+        let mut moved_shapes = Vec::with_capacity(shapes.len());
+        for &s in &shapes {
+            match self.shapes[s as usize].kind.transformed(delta) {
+                Some(k) => moved_shapes.push(k),
+                None => return false,
+            }
+        }
+        for (&s, k) in shapes.iter().zip(moved_shapes) {
+            self.shapes[s as usize].kind = k;
+        }
+        let (mut vs, mut ns) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+        for &t in &tris {
+            let tri = &self.triangles[t as usize];
+            vs.extend(tri.v);
+            if tri.has_normals() {
+                ns.extend(tri.n);
+            }
+        }
+        for v in vs {
+            self.positions[v as usize] = delta.point(self.positions[v as usize]);
+        }
+        for n in ns {
+            self.normals[n as usize] = delta.normal(self.normals[n as usize]);
+        }
+        if delta.flips_handedness() {
+            // Mirrored triangles keep facing outwards.
+            for &t in &tris {
+                let tri = &mut self.triangles[t as usize];
+                tri.v.swap(1, 2);
+                tri.n.swap(1, 2);
+                tri.uv.swap(1, 2);
+            }
+        }
+        for &k in &placed {
+            let xf = &mut self.instances[k].xf;
+            *xf = match *xf {
+                InstanceXf::Identity => InstanceXf::Static(*delta),
+                InstanceXf::Static(x) => InstanceXf::Static(x.then(delta)),
+                InstanceXf::Motion(..) => unreachable!("refused above"),
+            };
+        }
+        if let Some(world) = self.blas.first() {
+            let bounds: Vec<(u32, Aabb)> = world.indices.iter().map(|&p| (p, self.prim_bounds(p))).collect();
+            let lookup: std::collections::HashMap<u32, Aabb> = bounds.into_iter().collect();
+            self.blas[0].refit(|p| lookup[&p]);
+        }
+        let inst_bounds: Vec<Aabb> =
+            self.instances.iter().map(|i| i.xf.bounds(&self.blas[i.group as usize].bounds())).collect();
+        self.tlas.refit(|i| inst_bounds[i as usize]);
+        let emits = tris
+            .iter()
+            .chain(&shapes.iter().map(|s| nt + s).collect::<Vec<_>>())
+            .any(|&p| self.prim_light.get(p as usize).is_some_and(|&l| l != crate::lights::NO_LIGHT));
+        if emits {
+            self.rebuild_lights();
+        }
+        true
+    }
+
+    /// Replaces the light of `[[lights]]` entry `entry` (a light moved in the editor).
+    pub fn set_light(&mut self, entry: usize, light: Light) -> bool {
+        let i = self.provenance.lights.start as usize + entry;
+        if i >= self.provenance.lights.end as usize {
+            return false;
+        }
+        self.lights[i] = light;
+        self.rebuild_lights();
+        true
+    }
+
+    /// Builds the area lights and the light sampler again (after emitters or lights moved).
+    fn rebuild_lights(&mut self) {
+        self.lights.retain(|l| !matches!(l, Light::Area { .. }));
+        let world = self.blas.first().map(|b| b.indices.clone()).unwrap_or_default();
+        self.build_lights(self.settings.light_sampler, &world);
+    }
+
     #[inline]
     pub fn tri_points(&self, t: &Triangle) -> (Vec3, Vec3, Vec3) {
         (self.positions[t.v[0] as usize], self.positions[t.v[1] as usize], self.positions[t.v[2] as usize])

@@ -219,6 +219,42 @@ fn objects_move_within_their_file() {
     std::fs::remove_dir_all(d).ok();
 }
 
+/// Duplicating copies an entry's text, comments and all, after the last entry; changes
+/// made on disk come in as an undoable edit.
+#[test]
+fn blocks_copy_and_disk_changes_reload() {
+    let scene = "[camera]\nfov = 30\n\n# the ball\n[[objects]]\ntype = \"sphere\"  # round\n\n\
+                 [[objects]]\ntype = \"quad\"\norigin = [0, 0, 0]\nu = [1, 0, 0]\nv = [0, 1, 0]\n\n\
+                 [materials.red]\nalbedo = [1, 0, 0]\n";
+    let d = temp_scene("blocks", &[("scene.toml", scene)]);
+    let mut doc = SceneDoc::open(&d.join("scene.toml")).unwrap();
+    let ball = doc.files[0].doc.block_text(&["objects".into(), Seg::Index(0)]).unwrap();
+    assert_eq!(ball, "# the ball\n[[objects]]\ntype = \"sphere\"  # round");
+    assert!(doc.insert_block(0, &["objects".into()], &ball).unwrap());
+    assert!(
+        doc.files[0]
+            .doc
+            .text()
+            .contains("v = [0, 1, 0]\n\n# the ball\n[[objects]]\ntype = \"sphere\"  # round\n\n[materials.red]"),
+        "{}",
+        doc.files[0].doc.text()
+    );
+    assert_eq!(doc.tree.objects.len(), 3);
+    let red = doc.files[0].doc.block_text(&["materials".into(), "red".into()]).unwrap();
+    assert_eq!(red, "[materials.red]\nalbedo = [1, 0, 0]");
+    assert!(doc.files[0].doc.block_text(&["camera".into(), "fov".into()]).is_none());
+    doc.to_scene().unwrap();
+    assert!(doc.undo().unwrap());
+    assert_eq!(doc.files[0].doc.text(), scene);
+
+    std::fs::write(d.join("scene.toml"), scene.replace("fov = 30", "fov = 50")).unwrap();
+    assert!(doc.reload_file(0).unwrap());
+    assert!(!doc.is_dirty() && doc.files[0].doc.text().contains("fov = 50"));
+    assert!(doc.undo().unwrap());
+    assert!(doc.is_dirty(), "undoing the change on disk is an edit");
+    std::fs::remove_dir_all(d).ok();
+}
+
 #[test]
 fn save_as_stays_in_the_folder() {
     let d = temp_scene("saveas", &[("lib/mats.toml", LIB), ("scene.toml", SCENE)]);
