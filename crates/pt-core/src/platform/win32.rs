@@ -5,8 +5,8 @@
 #![expect(unsafe_code, reason = "raw Win32 FFI; the only module allowed to use unsafe")]
 #![expect(non_snake_case, clippy::upper_case_acronyms, reason = "mirror the Win32 SDK names verbatim")]
 
-use super::{Event, Key, Modifiers, MouseButton};
-use std::cell::RefCell;
+use super::{Cursor, Event, Key, Modifiers, MouseButton};
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
@@ -116,6 +116,13 @@ unsafe extern "system" {
     fn GetKeyState(vk: i32) -> i16;
     fn SetCapture(hwnd: HWND) -> HWND;
     fn ReleaseCapture() -> i32;
+    fn SetCursor(cursor: HANDLE) -> HANDLE;
+    fn GetDoubleClickTime() -> u32;
+    fn OpenClipboard(hwnd: HWND) -> i32;
+    fn CloseClipboard() -> i32;
+    fn EmptyClipboard() -> i32;
+    fn GetClipboardData(format: u32) -> HANDLE;
+    fn SetClipboardData(format: u32, mem: HANDLE) -> HANDLE;
 }
 
 #[link(name = "gdi32")]
@@ -167,6 +174,10 @@ unsafe extern "system" {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> HANDLE;
+    fn GlobalAlloc(flags: u32, bytes: usize) -> HANDLE;
+    fn GlobalLock(mem: HANDLE) -> *mut c_void;
+    fn GlobalUnlock(mem: HANDLE) -> i32;
+    fn GlobalFree(mem: HANDLE) -> HANDLE;
 }
 
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
@@ -176,16 +187,26 @@ const CS_VREDRAW: u32 = 0x0001;
 const SW_SHOW: i32 = 5;
 const PM_REMOVE: u32 = 1;
 const IDC_ARROW: usize = 32512;
+const IDC_IBEAM: usize = 32513;
+const IDC_SIZEWE: usize = 32644;
+const IDC_SIZENS: usize = 32645;
+const IDC_SIZEALL: usize = 32646;
+const IDC_HAND: usize = 32649;
 const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
+const CF_UNICODETEXT: u32 = 13;
+const GMEM_MOVEABLE: u32 = 2;
+const HTCLIENT: isize = 1;
 
 const WM_SIZE: u32 = 0x0005;
 const WM_KILLFOCUS: u32 = 0x0008;
 const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_SETCURSOR: u32 = 0x0020;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
+const WM_CHAR: u32 = 0x0102;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
@@ -211,6 +232,10 @@ const LOGPIXELSY: i32 = 90;
 
 thread_local! {
     static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+    /// The cursor shown over the client area (WM_SETCURSOR asks for it on every move).
+    static CURSOR: Cell<HANDLE> = const { Cell::new(null_mut()) };
+    /// The first half of a UTF-16 surrogate pair from WM_CHAR.
+    static HIGH_SURROGATE: Cell<u16> = const { Cell::new(0) };
 }
 
 fn push(e: Event) {
@@ -225,9 +250,17 @@ fn modifiers() -> Modifiers {
 
 fn translate_key(vk: usize) -> Key {
     match vk {
+        0x08 => Key::Backspace,
+        0x09 => Key::Tab,
+        0x0D => Key::Enter,
         0x1B => Key::Escape,
         0x20 => Key::Space,
+        0x21 => Key::PageUp,
+        0x22 => Key::PageDown,
+        0x23 => Key::End,
         0x24 => Key::Home,
+        0x2D => Key::Insert,
+        0x2E => Key::Delete,
         0x25 => Key::Left,
         0x26 => Key::Up,
         0x27 => Key::Right,
@@ -280,6 +313,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             push(Event::KeyUp { key: translate_key(wparam), mods: modifiers() });
             0
         }
+        WM_CHAR => {
+            // UTF-16 code units; characters outside the BMP come as a surrogate pair.
+            let unit = wparam as u16;
+            if (0xD800..0xDC00).contains(&unit) {
+                HIGH_SURROGATE.set(unit);
+            } else {
+                let high = HIGH_SURROGATE.replace(0);
+                let units: &[u16] = if (0xDC00..0xE000).contains(&unit) { &[high, unit] } else { &[unit] };
+                for c in char::decode_utf16(units.iter().copied()).flatten() {
+                    if !c.is_control() {
+                        push(Event::Text(c));
+                    }
+                }
+            }
+            0
+        }
+        WM_SETCURSOR if (lparam & 0xFFFF) == HTCLIENT => {
+            let cursor = CURSOR.get();
+            if cursor.is_null() {
+                // SAFETY: forwards the exact arguments Windows passed to this window procedure.
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+            // SAFETY: `cursor` is a shared system cursor from LoadCursorW.
+            unsafe { SetCursor(cursor) };
+            1
+        }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_pos(lparam);
             push(Event::MouseMove { x, y, mods: modifiers() });
@@ -330,6 +389,8 @@ pub struct Window {
     hwnd: HWND,
     font: HANDLE,
     line_height: i32,
+    /// Display DPI / 96.
+    scale: f32,
 }
 
 impl Window {
@@ -397,7 +458,7 @@ impl Window {
             let font = CreateFontW(-px, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0x31, face.as_ptr());
 
             ShowWindow(hwnd, SW_SHOW);
-            Ok(Window { hwnd, font, line_height: px + px / 4 })
+            Ok(Window { hwnd, font, line_height: px + px / 4, scale: dpi as f32 / 96.0 })
         }
     }
 
@@ -505,6 +566,85 @@ impl Window {
         let t = wide(title);
         // SAFETY: `self.hwnd` stays valid until Drop; `t` is NUL-terminated and outlives the call.
         unsafe { SetWindowTextW(self.hwnd, t.as_ptr()) };
+    }
+
+    /// Physical pixels per 96-dpi pixel.
+    pub fn scale_factor(&self) -> f32 {
+        self.scale
+    }
+
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        let id = match cursor {
+            Cursor::Arrow => IDC_ARROW,
+            Cursor::Text => IDC_IBEAM,
+            Cursor::ResizeH => IDC_SIZEWE,
+            Cursor::ResizeV => IDC_SIZENS,
+            Cursor::Hand => IDC_HAND,
+            Cursor::Move => IDC_SIZEALL,
+        };
+        // SAFETY: loading a predefined system cursor (an integer resource id) has no
+        // preconditions; the shared handle is never freed.
+        let handle = unsafe { LoadCursorW(null_mut(), id as *const u16) };
+        if CURSOR.replace(handle) != handle {
+            // SAFETY: as above; shows it now rather than at the next mouse move.
+            unsafe { SetCursor(handle) };
+        }
+    }
+
+    pub fn clipboard_text(&mut self) -> Option<String> {
+        // SAFETY: the clipboard is opened and closed on every path; the global memory is
+        // locked while read and holds a NUL-terminated UTF-16 string (CF_UNICODETEXT).
+        unsafe {
+            if OpenClipboard(self.hwnd) == 0 {
+                return None;
+            }
+            let mut text = None;
+            let mem = GetClipboardData(CF_UNICODETEXT);
+            if !mem.is_null() {
+                let p = GlobalLock(mem).cast::<u16>();
+                if !p.is_null() {
+                    let mut n = 0;
+                    while *p.add(n) != 0 {
+                        n += 1;
+                    }
+                    text = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)).replace("\r\n", "\n"));
+                    GlobalUnlock(mem);
+                }
+            }
+            CloseClipboard();
+            text
+        }
+    }
+
+    pub fn set_clipboard_text(&mut self, text: &str) {
+        let units: Vec<u16> = text.replace('\n', "\r\n").encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: the allocation holds `units` exactly; after SetClipboardData succeeds the
+        // system owns it, otherwise it is freed here. The clipboard is closed on every path.
+        unsafe {
+            if OpenClipboard(self.hwnd) == 0 {
+                return;
+            }
+            EmptyClipboard();
+            let mem = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2);
+            if !mem.is_null() {
+                let p = GlobalLock(mem).cast::<u16>();
+                if p.is_null() {
+                    GlobalFree(mem);
+                } else {
+                    std::ptr::copy_nonoverlapping(units.as_ptr(), p, units.len());
+                    GlobalUnlock(mem);
+                    if SetClipboardData(CF_UNICODETEXT, mem).is_null() {
+                        GlobalFree(mem);
+                    }
+                }
+            }
+            CloseClipboard();
+        }
+    }
+
+    pub fn double_click_time(&self) -> std::time::Duration {
+        // SAFETY: no arguments, no preconditions.
+        std::time::Duration::from_millis(u64::from(unsafe { GetDoubleClickTime() }))
     }
 }
 

@@ -292,12 +292,23 @@ pub fn light_anchor(light: &Light, display: &Display) -> Option<Vec3> {
 
 /// Light icons (screen-sized), spot cones and distant-light directions. The `[[lights]]`
 /// entries carry their ids; a sky's sun is drawn but cannot be selected.
-pub fn lights(o: &mut Overlays, proj: &Proj, scene: &Scene, display: &Display, sel: &Selection, scale: i32) {
+pub fn lights(
+    o: &mut Overlays,
+    proj: &Proj,
+    scene: &Scene,
+    display: &Display,
+    sel: &Selection,
+    hidden: &Selection,
+    scale: i32,
+) {
     let (_, r) = sphere(&display.bounds);
     let entries = scene.provenance.lights.clone();
     for (i, light) in scene.lights().iter().enumerate() {
         let entry = entries.contains(&(i as u32)).then(|| i as u32 - entries.start);
         let id = entry.map_or(0, |j| LIGHT_ID | j);
+        if hidden.has_id(id) {
+            continue;
+        }
         let color = if sel.has_id(id) { SELECTED } else { LIGHT };
         let Some(anchor) = light_anchor(light, display) else { continue };
         match light {
@@ -345,10 +356,10 @@ pub fn lights(o: &mut Overlays, proj: &Proj, scene: &Scene, display: &Display, s
 }
 
 /// Bounding boxes of the selected objects (and of every object with `all`).
-pub fn bounds(o: &mut Overlays, display: &Display, sel: &Selection, all: bool) {
+pub fn bounds(o: &mut Overlays, display: &Display, sel: &Selection, hidden: &Selection, all: bool) {
     for (i, b) in display.object_bounds.iter().enumerate() {
         let selected = sel.objects.get(i).copied().unwrap_or(false);
-        if selected || all {
+        if (selected || all) && !hidden.objects.get(i).copied().unwrap_or(false) {
             wire_box(o, b, if selected { SELECTED } else { BOUNDS }, i as u32 + 1);
         }
     }

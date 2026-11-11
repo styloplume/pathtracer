@@ -13,7 +13,7 @@
 )]
 #![expect(non_upper_case_globals, reason = "mirror the Cocoa constant names")]
 
-use super::{Event, Key, Modifiers, MouseButton};
+use super::{Cursor, Event, Key, Modifiers, MouseButton};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -211,6 +211,7 @@ const OTHER_MOUSE_DRAGGED: usize = 27;
 const NSEventModifierFlagShift: usize = 1 << 17;
 const NSEventModifierFlagControl: usize = 1 << 18;
 const NSEventModifierFlagOption: usize = 1 << 19;
+const NSEventModifierFlagCommand: usize = 1 << 20;
 
 const NSWindowStyleMaskTitledClosableMiniaturizableResizable: usize = 1 | 2 | 4 | 8;
 const NSBackingStoreBuffered: usize = 2;
@@ -221,8 +222,24 @@ const BITMAP_XRGB32_LITTLE: u32 = 6 | (2 << 12);
 fn modifiers(flags: usize) -> Modifiers {
     Modifiers {
         shift: flags & NSEventModifierFlagShift != 0,
-        ctrl: flags & NSEventModifierFlagControl != 0,
+        // Shortcuts are Command+key on macOS; the editor's Ctrl+key handling covers both.
+        ctrl: flags & (NSEventModifierFlagControl | NSEventModifierFlagCommand) != 0,
         alt: flags & NSEventModifierFlagOption != 0,
+    }
+}
+
+/// The contents of an `NSString`.
+///
+/// # Safety
+/// `s` must be null or a live `NSString`.
+unsafe fn string_of(s: Id) -> Option<String> {
+    if s.is_null() {
+        return None;
+    }
+    // SAFETY: per the contract; UTF8String returns a NUL-terminated buffer owned by `s`.
+    unsafe {
+        let utf8 = msg![*const c_char; s, c"UTF8String"];
+        (!utf8.is_null()).then(|| CStr::from_ptr(utf8).to_string_lossy().into_owned())
     }
 }
 
@@ -231,6 +248,14 @@ fn special_key(code: u16) -> Option<Key> {
     Some(match code {
         0x35 => Key::Escape,
         0x31 => Key::Space,
+        0x24 | 0x4C => Key::Enter,
+        0x30 => Key::Tab,
+        0x33 => Key::Backspace,
+        0x75 => Key::Delete,
+        0x72 => Key::Insert, // Help, where PC keyboards have Insert
+        0x77 => Key::End,
+        0x74 => Key::PageUp,
+        0x79 => Key::PageDown,
         0x73 => Key::Home,
         0x7B => Key::Left,
         0x7C => Key::Right,
@@ -437,6 +462,15 @@ impl Window {
                     if kind == KEY_DOWN {
                         let repeat = msg![Bool; ev, c"isARepeat"] != 0;
                         out.push(Event::KeyDown { key, mods, repeat });
+                        // Typed text, after the keyboard layout and dead keys; shortcuts type nothing.
+                        // Function keys come as characters of the private-use range F700-F8FF.
+                        if flags & (NSEventModifierFlagControl | NSEventModifierFlagCommand) == 0 {
+                            let text = string_of(msg![Id; ev, c"characters"]).unwrap_or_default();
+                            for c in text.chars().filter(|c| !c.is_control() && !('\u{F700}'..='\u{F8FF}').contains(c))
+                            {
+                                out.push(Event::Text(c));
+                            }
+                        }
                     } else {
                         out.push(Event::KeyUp { key, mods });
                     }
@@ -559,6 +593,65 @@ impl Window {
             // SAFETY: `self.nswin` is live; the NSString is autoreleased into this pool.
             unsafe { msg![(); self.nswin, c"setTitle:", ns_string(title) => Id] }
         });
+    }
+
+    /// Physical pixels per point (2 on Retina screens).
+    pub fn scale_factor(&self) -> f32 {
+        self.scale() as f32
+    }
+
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        let name = match cursor {
+            Cursor::Arrow => c"arrowCursor",
+            Cursor::Text => c"IBeamCursor",
+            Cursor::ResizeH => c"resizeLeftRightCursor",
+            Cursor::ResizeV => c"resizeUpDownCursor",
+            Cursor::Hand => c"pointingHandCursor",
+            Cursor::Move => c"openHandCursor",
+        };
+        with_pool(|| {
+            // SAFETY: NSCursor class methods return shared cursors; `set` takes no arguments.
+            unsafe {
+                let c = msg![Id; class(c"NSCursor"), name];
+                if !c.is_null() {
+                    msg![(); c, c"set"];
+                }
+            }
+        });
+    }
+
+    pub fn clipboard_text(&mut self) -> Option<String> {
+        with_pool(|| {
+            // SAFETY: the general pasteboard is shared; the string is autoreleased into the pool
+            // and copied out before it ends.
+            unsafe {
+                let pb = msg![Id; class(c"NSPasteboard"), c"generalPasteboard"];
+                if pb.is_null() {
+                    return None;
+                }
+                string_of(msg![Id; pb, c"stringForType:", ns_string("public.utf8-plain-text") => Id])
+            }
+        })
+    }
+
+    pub fn set_clipboard_text(&mut self, text: &str) {
+        with_pool(|| {
+            // SAFETY: as in `clipboard_text`; the NSStrings are autoreleased into the pool.
+            unsafe {
+                let pb = msg![Id; class(c"NSPasteboard"), c"generalPasteboard"];
+                if !pb.is_null() {
+                    msg![isize; pb, c"clearContents"];
+                    msg![Bool; pb, c"setString:forType:", ns_string(text) => Id,
+                        ns_string("public.utf8-plain-text") => Id];
+                }
+            }
+        });
+    }
+
+    pub fn double_click_time(&self) -> std::time::Duration {
+        // SAFETY: a class method returning seconds as a double.
+        let s = unsafe { msg![f64; class(c"NSEvent"), c"doubleClickInterval"] };
+        if s > 0.0 { std::time::Duration::from_secs_f64(s) } else { super::DOUBLE_CLICK }
     }
 }
 

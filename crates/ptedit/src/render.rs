@@ -100,6 +100,7 @@ fn shade(base: [f32; 3], n: Vec3, light: Vec3) -> [f32; 3] {
 }
 
 /// Draws `display` as seen through `proj` into `target`.
+#[expect(clippy::too_many_arguments, reason = "what one view shows and how")]
 pub fn render(
     raster: &mut Raster,
     target: &mut Target,
@@ -107,10 +108,11 @@ pub fn render(
     proj: &Proj,
     shading: Shading,
     sel: &Selection,
+    hidden: &Selection,
     overlays: &Overlays,
 ) -> Stats {
     let mut stats = Stats::default();
-    let vis = visible(display, proj, sel);
+    let vis = visible(display, proj, sel, hidden);
     // Front to back, so hidden surfaces fail the depth tests early.
     let mut order: Vec<usize> = (0..vis.len()).collect();
     order.sort_unstable_by(|&a, &b| vis[a].depth.total_cmp(&vis[b].depth));
@@ -255,16 +257,16 @@ pub fn render(
 
 /// The draws in view and how each is shown (with its level of detail), classified in
 /// parallel; past the triangle budget the smallest meshes on screen become boxes.
-fn visible(display: &Display, proj: &Proj, sel: &Selection) -> Vec<Visible> {
+fn visible(display: &Display, proj: &Proj, sel: &Selection, hidden: &Selection) -> Vec<Visible> {
     let world_map = proj.clip_map();
     let classify = |i: usize| -> Option<Visible> {
         let d = &display.draws[i];
-        if crate::view::culls(&world_map, &d.bounds) {
+        let id = d.object.map_or(0, |o| o + 1);
+        if hidden.has_id(id) || crate::view::culls(&world_map, &d.bounds) {
             return None;
         }
         let c = d.bounds.centroid();
         let px = (d.bounds.max - d.bounds.min).length() / proj.pixel_size(c);
-        let id = d.object.map_or(0, |o| o + 1);
         let v = Visible {
             draw: i as u32,
             mesh: None,

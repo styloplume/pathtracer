@@ -459,6 +459,7 @@ impl App<'_> {
                 self.needs_present = true;
             }
             Event::Paint => self.needs_present = true,
+            Event::Text(_) => {}
             Event::FocusLost => {
                 self.held.clear();
                 self.drag = None;

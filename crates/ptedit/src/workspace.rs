@@ -36,6 +36,7 @@ impl Rect {
     }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "independent view toggles")]
 pub struct Workspace {
     pub doc: SceneDoc,
     pub scene: Scene,
@@ -51,20 +52,52 @@ pub struct Workspace {
     pub grid: bool,
     pub all_bounds: bool,
     pub sel: Selection,
+    /// Objects and lights hidden in the views (the editor's own state, not the scene's).
+    pub hidden: Selection,
     raster: Raster,
     targets: Vec<Target>,
     pub stats: Stats,
     pub frame_ms: f32,
+    /// Leave the views' text labels out of the image and collect them in `labels` (for
+    /// the editor to draw with its own font).
+    pub labels_apart: bool,
+    pub labels: Vec<overlay::Label>,
+    /// Why the document does not load (the views show the last scene that did).
+    pub load_error: Option<String>,
+}
+
+/// A scene with nothing in it.
+fn empty_scene() -> Scene {
+    use pt_core::{
+        camera::CameraDesc,
+        material::Material,
+        math::Vec3,
+        scene::{Geometry, RenderSettings},
+    };
+    Scene::new(
+        RenderSettings::default(),
+        CameraDesc::default(),
+        vec![],
+        vec![Material::diffuse(Vec3::ONE)],
+        Geometry::default(),
+    )
 }
 
 impl Workspace {
+    /// Opens the scene file `path`. A scene the loader rejects still opens (with nothing in
+    /// the views and the error in `load_error`), so that it can be fixed in the editor.
     pub fn open(path: &Path) -> Result<Workspace, String> {
         let doc = SceneDoc::open(path)?;
-        let scene = doc.to_scene()?;
+        let (scene, load_error) = match doc.to_scene() {
+            Ok(s) => (s, None),
+            Err(e) => (empty_scene(), Some(e)),
+        };
         let display = Display::build(&scene);
         let views = KINDS.map(|k| View::new(k, &scene.camera, &display.bounds));
         let sel = Selection::new(scene.provenance.objects.len(), scene.provenance.lights.len());
+        let hidden = sel.clone();
         Ok(Workspace {
+            hidden,
             doc,
             scene,
             display,
@@ -80,16 +113,22 @@ impl Workspace {
             targets: (0..4).map(|_| Target::new(0, 0)).collect(),
             stats: Stats::default(),
             frame_ms: 0.0,
+            labels_apart: false,
+            labels: Vec::new(),
+            load_error,
         })
     }
 
-    /// Rebuilds the scene after the document changed; the views stay where they are.
+    /// Rebuilds the scene after the document changed; the views stay where they are. When
+    /// the loader rejects the document, the last scene that loaded stays.
     pub fn reload(&mut self) -> Result<(), String> {
-        let scene = self.doc.to_scene()?;
+        let scene = self.doc.to_scene().inspect_err(|e| self.load_error = Some(e.clone()))?;
+        self.load_error = None;
         self.display = Display::build(&scene);
         let (objects, lights) = (scene.provenance.objects.len(), scene.provenance.lights.len());
         if (objects, lights) != (self.sel.objects.len(), self.sel.lights.len()) {
             self.sel = Selection::new(objects, lights);
+            self.hidden = Selection::new(objects, lights);
         }
         self.scene = scene;
         Ok(())
@@ -129,6 +168,7 @@ impl Workspace {
         let mut out = vec![BORDER; w * h];
         let rects = self.rects(w, h);
         let mut stats = Stats::default();
+        self.labels.clear();
         for r in &rects {
             if r.w == 0 || r.h == 0 {
                 continue;
@@ -141,8 +181,8 @@ impl Workspace {
                 overlay::grid(&mut o, &proj, view.kind, view_target(&proj, view.kind));
             }
             overlay::camera(&mut o, &proj, &self.scene, &self.display);
-            overlay::lights(&mut o, &proj, &self.scene, &self.display, &self.sel, scale);
-            overlay::bounds(&mut o, &self.display, &self.sel, self.all_bounds);
+            overlay::lights(&mut o, &proj, &self.scene, &self.display, &self.sel, &self.hidden, scale);
+            overlay::bounds(&mut o, &self.display, &self.sel, &self.hidden, self.all_bounds);
             overlay::axis_indicator(&mut o, &proj, scale);
             let mut label = view.kind.name().to_owned();
             if !view.is_fixed() {
@@ -150,9 +190,19 @@ impl Workspace {
             }
             let lw = paint::text_width(&label, scale);
             o.labels.push(overlay::Label { x: r.w as i32 - lw - 10, y: 8, text: label, color: 0xc8_c8_d0 });
+            if self.labels_apart {
+                // In image coordinates, at the centre of where the built-in font would put them.
+                let ch = paint::CELL.1 as i32 * scale;
+                for l in o.labels.drain(..) {
+                    let w = paint::text_width(&l.text, scale);
+                    let (cx, cy) = (r.x as i32 + l.x + w / 2, r.y as i32 + l.y + (ch - scale) / 2);
+                    self.labels.push(overlay::Label { x: cx, y: cy, ..l });
+                }
+            }
             let target = &mut self.targets[r.view];
             target.resize(r.w, r.h);
-            let s = render::render(&mut self.raster, target, &self.display, &proj, self.shading, &self.sel, &o);
+            let (sel, hidden) = (&self.sel, &self.hidden);
+            let s = render::render(&mut self.raster, target, &self.display, &proj, self.shading, sel, hidden, &o);
             stats.triangles += s.triangles;
             stats.boxes += s.boxes;
             for y in 0..r.h {
@@ -178,6 +228,9 @@ impl Workspace {
         let reach = 9.0 * render::label_scale(r.h) as f32;
         let mut best: Option<(f32, u32)> = None;
         for (j, i) in self.scene.provenance.lights.clone().enumerate() {
+            if self.hidden.lights.get(j).copied().unwrap_or(false) {
+                continue;
+            }
             let Some(a) = overlay::light_anchor(&self.scene.lights()[i as usize], &self.display) else { continue };
             if let Some((sx, sy, _)) = proj.to_screen(a) {
                 let d = (sx - x).hypot(sy - y);
@@ -189,9 +242,17 @@ impl Workspace {
         if let Some((_, id)) = best {
             return Some(id);
         }
-        let ray = proj.ray(x, y);
-        let hit = self.scene.intersect(&ray, f32::INFINITY)?;
-        self.scene.object_of(hit.prim, hit.inst).map(|o| o as u32 + 1)
+        // Through hidden objects: cast again from just past each.
+        let mut ray = proj.ray(x, y);
+        for _ in 0..64 {
+            let hit = self.scene.intersect(&ray, f32::INFINITY)?;
+            let id = self.scene.object_of(hit.prim, hit.inst).map(|o| o as u32 + 1);
+            if !id.is_some_and(|id| self.hidden.has_id(id)) {
+                return id;
+            }
+            ray.o += ray.d * (hit.t * 1.0001 + 1e-4);
+        }
+        None
     }
 
     /// Everything drawn inside a view-local rectangle (as last drawn): visible objects and

@@ -181,6 +181,57 @@ fn drags_are_one_undo_step() {
 }
 
 #[test]
+fn renames_update_references_in_one_undo_step() {
+    let d = temp_scene("rename", &[("lib/mats.toml", LIB), ("scene.toml", SCENE)]);
+    let mut doc = SceneDoc::open(&d.join("scene.toml")).unwrap();
+    let red = doc.tree.materials.iter().find(|m| m.label == "red").unwrap().clone();
+    assert!(doc.rename(&red, "crimson").unwrap());
+    assert!(doc.files[1].doc.text().contains("[materials.crimson]\ntype = \"diffuse\""));
+    assert!(doc.files[0].doc.text().contains("material = \"crimson\"\n"), "the reference in the other file");
+    assert!(doc.tree.materials.iter().any(|m| m.label == "crimson"));
+    doc.to_scene().unwrap();
+    let blue = doc.tree.materials.iter().find(|m| m.label == "blue").unwrap().clone();
+    assert!(doc.rename(&blue, "crimson").unwrap_err().contains("already"));
+    assert!(doc.undo().unwrap());
+    assert_eq!((doc.files[0].doc.text(), doc.files[1].doc.text()), (SCENE, LIB));
+    // Objects and lights rename by their `name`.
+    let floor = doc.tree.objects[1].clone();
+    doc.rename(&floor, "ground").unwrap();
+    assert_eq!(doc.tree.objects[1].label, "ground");
+    doc.rename(&doc.tree.objects[1].clone(), "").unwrap();
+    assert_eq!(doc.tree.objects[1].label, "quad");
+    std::fs::remove_dir_all(d).ok();
+}
+
+#[test]
+fn objects_move_within_their_file() {
+    let scene = format!("{SCENE}\n[[objects]]\ntype = \"sphere\"\nname = \"ball\"\n");
+    let d = temp_scene("move", &[("lib/mats.toml", LIB), ("scene.toml", &scene)]);
+    let mut doc = SceneDoc::open(&d.join("scene.toml")).unwrap();
+    let labels = |doc: &SceneDoc| doc.tree.objects.iter().map(|o| o.label.clone()).collect::<Vec<_>>();
+    assert_eq!(labels(&doc), ["sphere", "floor", "ball"]);
+    let ball = doc.tree.objects[2].clone();
+    assert!(doc.move_item(&ball, 0).unwrap());
+    assert_eq!(labels(&doc), ["sphere", "ball", "floor"], "first among the scene file's own objects");
+    doc.to_scene().unwrap();
+    assert!(doc.undo().unwrap());
+    assert_eq!(doc.files[0].doc.text(), scene);
+    std::fs::remove_dir_all(d).ok();
+}
+
+#[test]
+fn save_as_stays_in_the_folder() {
+    let d = temp_scene("saveas", &[("lib/mats.toml", LIB), ("scene.toml", SCENE)]);
+    let mut doc = SceneDoc::open(&d.join("scene.toml")).unwrap();
+    assert!(doc.save_as(&d.join("lib/elsewhere.toml")).is_err());
+    let written = doc.save_as(&d.join("copy.toml")).unwrap();
+    assert_eq!(written, [d.join("copy.toml")]);
+    assert_eq!(std::fs::read_to_string(d.join("copy.toml")).unwrap(), SCENE);
+    assert_eq!(doc.path(), d.join("copy.toml"));
+    std::fs::remove_dir_all(d).ok();
+}
+
+#[test]
 fn include_edits_load_files_and_cycles_are_refused() {
     let d = temp_scene(
         "include",

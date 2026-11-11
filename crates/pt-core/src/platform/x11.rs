@@ -8,10 +8,11 @@
 #![expect(unsafe_code, reason = "raw Xlib / libdl FFI; the platform layer is the only place allowed to use unsafe")]
 #![expect(non_snake_case, reason = "mirror the Xlib names verbatim")]
 
-use super::{Event, Key, Modifiers, MouseButton};
+use super::{Cursor, Event, Key, Modifiers, MouseButton};
 use std::collections::HashSet;
-use std::ffi::{CString, c_char, c_int, c_long, c_uint, c_ulong, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::ptr::{null, null_mut};
+use std::time::{Duration, Instant};
 
 type Display = c_void;
 type XWindow = c_ulong;
@@ -82,6 +83,44 @@ struct XExposeEvent {
 }
 
 #[repr(C)]
+struct XSelectionRequestEvent {
+    kind: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: *mut Display,
+    owner: XWindow,
+    requestor: XWindow,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: c_ulong,
+}
+
+#[repr(C)]
+struct XSelectionClearEvent {
+    kind: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: *mut Display,
+    window: XWindow,
+    selection: Atom,
+    time: c_ulong,
+}
+
+#[repr(C)]
+struct XSelectionEvent {
+    kind: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: *mut Display,
+    requestor: XWindow,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: c_ulong,
+}
+
+#[repr(C)]
 struct XClientMessageEvent {
     kind: c_int,
     serial: c_ulong,
@@ -147,16 +186,25 @@ struct XFontStruct {
 }
 
 const RTLD_NOW: c_int = 2;
+#[cfg(target_os = "linux")]
+const LC_CTYPE: c_int = 0;
+#[cfg(not(target_os = "linux"))]
+const LC_CTYPE: c_int = 2;
 
 unsafe extern "C" {
     fn dlopen(file: *const c_char, mode: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+    fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
 }
+
+/// `XCreateIC` takes a NULL-terminated list of name / value pairs.
+type CreateIc = unsafe extern "C" fn(*mut c_void, ...) -> *mut c_void;
 
 /// Declares the Xlib functions we use and a table holding them, resolved with `dlsym`.
 macro_rules! xlib {
     ($($name:ident: fn($($arg:ty),*) -> $ret:ty;)*) => {
         struct Xlib {
+            lib: *mut c_void,
             $($name: unsafe extern "C" fn($($arg),*) -> $ret,)*
         }
 
@@ -173,6 +221,7 @@ macro_rules! xlib {
                         return Err("cannot load libX11 (is X11 installed?); use --headless".into());
                     }
                     Ok(Xlib {
+                        lib,
                         $($name: {
                             let p = dlsym(lib, concat!(stringify!($name), "\0").as_ptr().cast());
                             if p.is_null() {
@@ -222,6 +271,36 @@ xlib! {
     XCreatePixmap: fn(*mut Display, Drawable, c_uint, c_uint, c_uint) -> c_ulong;
     XFreePixmap: fn(*mut Display, c_ulong) -> c_int;
     XCopyArea: fn(*mut Display, Drawable, Drawable, Gc, c_int, c_int, c_uint, c_uint, c_int, c_int) -> c_int;
+    XFilterEvent: fn(*mut XEvent, XWindow) -> c_int;
+    XLookupString: fn(*mut XInputEvent, *mut c_char, c_int, *mut KeySym, *mut c_void) -> c_int;
+    Xutf8LookupString: fn(*mut c_void, *mut XInputEvent, *mut c_char, c_int, *mut KeySym, *mut c_int) -> c_int;
+    XSetLocaleModifiers: fn(*const c_char) -> *mut c_char;
+    XOpenIM: fn(*mut Display, *mut c_void, *mut c_char, *mut c_char) -> *mut c_void;
+    XCloseIM: fn(*mut c_void) -> c_int;
+    XDestroyIC: fn(*mut c_void) -> ();
+    XSetICFocus: fn(*mut c_void) -> ();
+    XSetSelectionOwner: fn(*mut Display, Atom, XWindow, c_ulong) -> c_int;
+    XGetSelectionOwner: fn(*mut Display, Atom) -> XWindow;
+    XConvertSelection: fn(*mut Display, Atom, Atom, Atom, XWindow, c_ulong) -> c_int;
+    XCheckTypedWindowEvent: fn(*mut Display, XWindow, c_int, *mut XEvent) -> c_int;
+    XGetWindowProperty: fn(
+        *mut Display, XWindow, Atom, c_long, c_long, c_int, Atom,
+        *mut Atom, *mut c_int, *mut c_ulong, *mut c_ulong, *mut *mut u8
+    ) -> c_int;
+    XSendEvent: fn(*mut Display, XWindow, c_int, c_long, *mut XEvent) -> c_int;
+    XCreateFontCursor: fn(*mut Display, c_uint) -> c_ulong;
+    XDefineCursor: fn(*mut Display, XWindow, c_ulong) -> c_int;
+    XFreeCursor: fn(*mut Display, c_ulong) -> c_int;
+    XResourceManagerString: fn(*mut Display) -> *mut c_char;
+    XSetErrorHandler: fn(Option<ErrorHandler>) -> *mut c_void;
+}
+
+type ErrorHandler = unsafe extern "C" fn(*mut Display, *mut c_void) -> c_int;
+
+/// Protocol errors are not fatal for us (the default handler exits the process): the
+/// usual one is a clipboard requestor whose window is gone before our answer arrives.
+unsafe extern "C" fn ignore_x_error(_display: *mut Display, _event: *mut c_void) -> c_int {
+    0
 }
 
 const KEY_PRESS: c_int = 2;
@@ -229,10 +308,22 @@ const KEY_RELEASE: c_int = 3;
 const BUTTON_PRESS: c_int = 4;
 const BUTTON_RELEASE: c_int = 5;
 const MOTION_NOTIFY: c_int = 6;
+const FOCUS_IN: c_int = 9;
 const FOCUS_OUT: c_int = 10;
 const EXPOSE: c_int = 12;
 const CONFIGURE_NOTIFY: c_int = 22;
+const SELECTION_CLEAR: c_int = 29;
+const SELECTION_REQUEST: c_int = 30;
+const SELECTION_NOTIFY: c_int = 31;
 const CLIENT_MESSAGE: c_int = 33;
+
+const XA_ATOM: Atom = 4;
+const XA_STRING: Atom = 31;
+const CURRENT_TIME: c_ulong = 0;
+const XIM_PREEDIT_NOTHING: c_long = 0x0008;
+const XIM_STATUS_NOTHING: c_long = 0x0400;
+const XLOOKUP_CHARS: c_int = 2;
+const XLOOKUP_BOTH: c_int = 4;
 
 const KEY_PRESS_MASK: c_long = 1 << 0;
 const KEY_RELEASE_MASK: c_long = 1 << 1;
@@ -273,6 +364,14 @@ fn translate_key(sym: KeySym) -> Key {
     match sym {
         0xFF1B => Key::Escape,
         0x20 => Key::Space,
+        0xFF0D | 0xFF8D => Key::Enter,
+        0xFF09 | 0xFE20 => Key::Tab,
+        0xFF08 => Key::Backspace,
+        0xFFFF | 0xFF9F => Key::Delete,
+        0xFF63 | 0xFF9E => Key::Insert,
+        0xFF57 | 0xFF9C => Key::End,
+        0xFF55 | 0xFF9A => Key::PageUp,
+        0xFF56 | 0xFF9B => Key::PageDown,
         0xFF50 | 0xFF95 => Key::Home,
         0xFF51 | 0xFF96 => Key::Left,
         0xFF52 | 0xFF97 => Key::Up,
@@ -308,6 +407,26 @@ pub struct Window {
     scaled: Vec<u32>,
     /// Off-screen pixmap for composing the overlay, and its size.
     pixmap: Option<(c_ulong, u32, u32)>,
+    /// Input method and context for typed text (null: Latin-1 through `XLookupString`).
+    im: *mut c_void,
+    ic: *mut c_void,
+    clipboard: Atom,
+    targets: Atom,
+    text_atom: Atom,
+    /// The property our clipboard requests are delivered to.
+    transfer: Atom,
+    /// What we offer as the CLIPBOARD selection while we own it.
+    clip: Option<String>,
+    cursors: Vec<(Cursor, c_ulong)>,
+    cursor: Cursor,
+    scale: f32,
+}
+
+/// `Xft.dpi` from the resource database string (what desktops set for high-DPI screens), over 96.
+fn xft_scale(resources: &str) -> Option<f32> {
+    let line = resources.lines().find_map(|l| l.strip_prefix("Xft.dpi:"))?;
+    let dpi: f32 = line.trim().parse().ok()?;
+    (dpi > 0.0).then_some(dpi / 96.0)
 }
 
 impl Window {
@@ -320,6 +439,7 @@ impl Window {
             if display.is_null() {
                 return Err("cannot open the X display (is DISPLAY set?); use --headless".into());
             }
+            (x.XSetErrorHandler)(Some(ignore_x_error));
             let screen = (x.XDefaultScreen)(display);
             let visual = (x.XDefaultVisual)(display, screen);
             let depth = (x.XDefaultDepth)(display, screen);
@@ -346,6 +466,34 @@ impl Window {
                     | STRUCTURE_NOTIFY_MASK
                     | FOCUS_CHANGE_MASK,
             );
+            // Typed text: an input method in the user's locale (dead keys, compose, IMEs).
+            let ctype = setlocale(LC_CTYPE, null());
+            if ctype.is_null() || CStr::from_ptr(ctype).to_bytes() == b"C" {
+                setlocale(LC_CTYPE, c"".as_ptr());
+            }
+            (x.XSetLocaleModifiers)(c"".as_ptr());
+            let im = (x.XOpenIM)(display, null_mut(), null_mut(), null_mut());
+            let mut ic = null_mut();
+            let create_ic = dlsym(x.lib, c"XCreateIC".as_ptr());
+            if !im.is_null() && !create_ic.is_null() {
+                let create_ic = std::mem::transmute::<*mut c_void, CreateIc>(create_ic);
+                ic = create_ic(
+                    im,
+                    c"inputStyle".as_ptr(),
+                    XIM_PREEDIT_NOTHING | XIM_STATUS_NOTHING,
+                    c"clientWindow".as_ptr(),
+                    window,
+                    c"focusWindow".as_ptr(),
+                    window,
+                    null::<c_char>(),
+                );
+                if !ic.is_null() {
+                    (x.XSetICFocus)(ic);
+                }
+            }
+            let resources = (x.XResourceManagerString)(display);
+            let scale =
+                if resources.is_null() { None } else { xft_scale(&CStr::from_ptr(resources).to_string_lossy()) };
             let mut wm_delete = (x.XInternAtom)(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
             (x.XSetWMProtocols)(display, window, &raw mut wm_delete, 1);
             (x.XkbSetDetectableAutoRepeat)(display, 1, null_mut());
@@ -362,6 +510,10 @@ impl Window {
 
             let net_wm_name = (x.XInternAtom)(display, c"_NET_WM_NAME".as_ptr(), 0);
             let utf8_string = (x.XInternAtom)(display, c"UTF8_STRING".as_ptr(), 0);
+            let clipboard = (x.XInternAtom)(display, c"CLIPBOARD".as_ptr(), 0);
+            let targets = (x.XInternAtom)(display, c"TARGETS".as_ptr(), 0);
+            let text_atom = (x.XInternAtom)(display, c"TEXT".as_ptr(), 0);
+            let transfer = (x.XInternAtom)(display, c"PATHTRACER_CLIPBOARD".as_ptr(), 0);
             let win = Window {
                 x,
                 display,
@@ -377,6 +529,16 @@ impl Window {
                 down: HashSet::new(),
                 scaled: Vec::new(),
                 pixmap: None,
+                im,
+                ic,
+                clipboard,
+                targets,
+                text_atom,
+                transfer,
+                clip: None,
+                cursors: Vec::new(),
+                cursor: Cursor::Arrow,
+                scale: scale.unwrap_or(1.0),
             };
             win.set_title(title);
             (win.x.XMapWindow)(display, window);
@@ -393,6 +555,10 @@ impl Window {
             while (self.x.XPending)(self.display) > 0 {
                 let mut ev = XEvent { pad: [0; 24] };
                 (self.x.XNextEvent)(self.display, &raw mut ev);
+                // Keys the input method consumes (dead keys, compose sequences).
+                if (self.x.XFilterEvent)(&raw mut ev, 0) != 0 {
+                    continue;
+                }
                 let p = (&raw mut ev).cast::<XInputEvent>();
                 match ev.kind() {
                     KEY_PRESS | KEY_RELEASE => {
@@ -401,6 +567,9 @@ impl Window {
                         if ev.kind() == KEY_PRESS {
                             let repeat = !self.down.insert(key);
                             out.push(Event::KeyDown { key, mods, repeat });
+                            for c in self.typed(p).chars().filter(|c| !c.is_control()) {
+                                out.push(Event::Text(c));
+                            }
                         } else {
                             self.down.remove(&key);
                             out.push(Event::KeyUp { key, mods });
@@ -434,9 +603,21 @@ impl Window {
                         let e = &*p;
                         out.push(Event::MouseMove { x: e.x, y: e.y, mods: modifiers(e.state) });
                     }
+                    FOCUS_IN => {
+                        if !self.ic.is_null() {
+                            (self.x.XSetICFocus)(self.ic);
+                        }
+                    }
                     FOCUS_OUT => {
                         self.down.clear();
                         out.push(Event::FocusLost);
+                    }
+                    SELECTION_REQUEST => self.answer_selection(&*(&raw const ev).cast::<XSelectionRequestEvent>()),
+                    SELECTION_CLEAR => {
+                        let e = &*(&raw const ev).cast::<XSelectionClearEvent>();
+                        if e.selection == self.clipboard {
+                            self.clip = None;
+                        }
                     }
                     EXPOSE => {
                         if (*(&raw const ev).cast::<XExposeEvent>()).count == 0 {
@@ -462,6 +643,209 @@ impl Window {
             }
         }
         out
+    }
+
+    /// The text a key press types (empty for keys that type nothing).
+    ///
+    /// # Safety
+    /// `p` must point to a live key press event of this window.
+    unsafe fn typed(&self, p: *mut XInputEvent) -> String {
+        let mut buf = [0u8; 64];
+        let mut sym: KeySym = 0;
+        // SAFETY: per the contract; `buf` is writable for its whole length.
+        unsafe {
+            if self.ic.is_null() {
+                let n =
+                    (self.x.XLookupString)(p, buf.as_mut_ptr().cast(), buf.len() as c_int, &raw mut sym, null_mut());
+                // Latin-1 without an input method.
+                buf[..n.clamp(0, 64) as usize].iter().map(|&b| char::from(b)).collect()
+            } else {
+                let mut status = 0;
+                let n = (self.x.Xutf8LookupString)(
+                    self.ic,
+                    p,
+                    buf.as_mut_ptr().cast(),
+                    buf.len() as c_int,
+                    &raw mut sym,
+                    &raw mut status,
+                );
+                if status == XLOOKUP_CHARS || status == XLOOKUP_BOTH {
+                    String::from_utf8_lossy(&buf[..n.clamp(0, 64) as usize]).into_owned()
+                } else {
+                    String::new()
+                }
+            }
+        }
+    }
+
+    /// Another client asks for our CLIPBOARD contents: write them to its property and tell it.
+    ///
+    /// # Safety
+    /// `r` must be a selection request delivered to this window.
+    unsafe fn answer_selection(&self, r: &XSelectionRequestEvent) {
+        // Obsolete clients leave the property empty and mean the target.
+        let property = if r.property == 0 { r.target } else { r.property };
+        let mut reply = XSelectionEvent {
+            kind: SELECTION_NOTIFY,
+            serial: 0,
+            send_event: 1,
+            display: self.display,
+            requestor: r.requestor,
+            selection: r.selection,
+            target: r.target,
+            property: 0,
+            time: r.time,
+        };
+        // SAFETY: the property data outlives the XChangeProperty calls; the reply is copied
+        // into a full-size XEvent for XSendEvent.
+        unsafe {
+            if let (true, Some(text)) = (r.selection == self.clipboard, &self.clip) {
+                if r.target == self.targets {
+                    let atoms = [self.targets, self.utf8_string, XA_STRING];
+                    (self.x.XChangeProperty)(
+                        self.display,
+                        r.requestor,
+                        property,
+                        XA_ATOM,
+                        32,
+                        PROP_MODE_REPLACE,
+                        atoms.as_ptr().cast(),
+                        atoms.len() as c_int,
+                    );
+                    reply.property = property;
+                } else if r.target == self.utf8_string || r.target == self.text_atom || r.target == XA_STRING {
+                    let bytes: Vec<u8> = if r.target == XA_STRING {
+                        text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect()
+                    } else {
+                        text.as_bytes().to_vec()
+                    };
+                    let ty = if r.target == XA_STRING { XA_STRING } else { self.utf8_string };
+                    (self.x.XChangeProperty)(
+                        self.display,
+                        r.requestor,
+                        property,
+                        ty,
+                        8,
+                        PROP_MODE_REPLACE,
+                        bytes.as_ptr(),
+                        bytes.len() as c_int,
+                    );
+                    reply.property = property;
+                }
+            }
+            let mut ev = XEvent { pad: [0; 24] };
+            std::ptr::write((&raw mut ev).cast::<XSelectionEvent>(), reply);
+            (self.x.XSendEvent)(self.display, r.requestor, 0, 0, &raw mut ev);
+            (self.x.XFlush)(self.display);
+        }
+    }
+
+    /// The CLIPBOARD selection as text: ours, or asked from its owner (waiting up to half a
+    /// second for the answer).
+    pub fn clipboard_text(&mut self) -> Option<String> {
+        // SAFETY: Xlib calls on this window's display; the property data is copied and then
+        // released with XFree; `ev` is a full-size XEvent.
+        unsafe {
+            let owner = (self.x.XGetSelectionOwner)(self.display, self.clipboard);
+            if owner == self.win {
+                return self.clip.clone();
+            }
+            if owner == 0 {
+                return None;
+            }
+            (self.x.XConvertSelection)(
+                self.display,
+                self.clipboard,
+                self.utf8_string,
+                self.transfer,
+                self.win,
+                CURRENT_TIME,
+            );
+            (self.x.XFlush)(self.display);
+            let start = Instant::now();
+            let mut ev = XEvent { pad: [0; 24] };
+            loop {
+                if (self.x.XCheckTypedWindowEvent)(self.display, self.win, SELECTION_NOTIFY, &raw mut ev) != 0 {
+                    break;
+                }
+                if start.elapsed() > Duration::from_millis(500) {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if (*(&raw const ev).cast::<XSelectionEvent>()).property == 0 {
+                return None; // the owner cannot give text
+            }
+            let (mut ty, mut format, mut items, mut after) = (0, 0, 0, 0);
+            let mut data: *mut u8 = null_mut();
+            (self.x.XGetWindowProperty)(
+                self.display,
+                self.win,
+                self.transfer,
+                0,
+                1 << 24,
+                1,
+                0,
+                &raw mut ty,
+                &raw mut format,
+                &raw mut items,
+                &raw mut after,
+                &raw mut data,
+            );
+            if data.is_null() {
+                return None;
+            }
+            let text = (format == 8)
+                .then(|| String::from_utf8_lossy(std::slice::from_raw_parts(data, items as usize)).into_owned());
+            (self.x.XFree)(data.cast());
+            text
+        }
+    }
+
+    /// Owns the CLIPBOARD selection with `text`; other clients ask us for it.
+    pub fn set_clipboard_text(&mut self, text: &str) {
+        self.clip = Some(text.to_owned());
+        // SAFETY: plain Xlib calls on this window.
+        unsafe {
+            (self.x.XSetSelectionOwner)(self.display, self.clipboard, self.win, CURRENT_TIME);
+            (self.x.XFlush)(self.display);
+        }
+    }
+
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        if cursor == self.cursor {
+            return;
+        }
+        self.cursor = cursor;
+        let shape = match cursor {
+            Cursor::Arrow => 68,    // XC_left_ptr
+            Cursor::Text => 152,    // XC_xterm
+            Cursor::ResizeH => 108, // XC_sb_h_double_arrow
+            Cursor::ResizeV => 116, // XC_sb_v_double_arrow
+            Cursor::Hand => 60,     // XC_hand2
+            Cursor::Move => 52,     // XC_fleur
+        };
+        // SAFETY: font cursors are created once per shape, kept until Drop, and defined on
+        // this window.
+        unsafe {
+            let known = self.cursors.iter().find(|(k, _)| *k == cursor).map(|&(_, c)| c);
+            let c = known.unwrap_or_else(|| {
+                let c = (self.x.XCreateFontCursor)(self.display, shape);
+                self.cursors.push((cursor, c));
+                c
+            });
+            (self.x.XDefineCursor)(self.display, self.win, c);
+            (self.x.XFlush)(self.display);
+        }
+    }
+
+    /// `Xft.dpi` / 96, as desktops set it for high-DPI screens (1 when unset).
+    pub fn scale_factor(&self) -> f32 {
+        self.scale
+    }
+
+    pub fn double_click_time(&self) -> Duration {
+        super::DOUBLE_CLICK
     }
 
     pub fn client_size(&self) -> (u32, u32) {
@@ -573,6 +957,15 @@ impl Drop for Window {
         unsafe {
             if let Some((p, ..)) = self.pixmap {
                 (self.x.XFreePixmap)(self.display, p);
+            }
+            for &(_, c) in &self.cursors {
+                (self.x.XFreeCursor)(self.display, c);
+            }
+            if !self.ic.is_null() {
+                (self.x.XDestroyIC)(self.ic);
+            }
+            if !self.im.is_null() {
+                (self.x.XCloseIM)(self.im);
             }
             if !self.font.is_null() {
                 (self.x.XFreeFont)(self.display, self.font);

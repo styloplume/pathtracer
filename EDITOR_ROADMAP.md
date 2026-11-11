@@ -69,21 +69,37 @@ crates/
 
 ## E2 — UI toolkit
 
-- [ ] Platform input for UI: text input (`WM_CHAR`; X11 `XLookupString` / XIM; Cocoa `NSTextInputClient`),
+- [x] Platform input for UI: text input (`WM_CHAR`; X11 `XLookupString` / XIM; Cocoa `NSTextInputClient`),
   clipboard (Win32 clipboard, X11 `CLIPBOARD` selection, `NSPasteboard`), cursor shapes, key repeat, double
   click, HiDPI scale factor
-- [ ] Text: embedded bitmap font first; then our own TrueType rasterizer (`glyf` quadratic outlines, coverage
+- [x] Text: embedded bitmap font first; then our own TrueType rasterizer (`glyf` quadratic outlines, coverage
   antialiasing, glyph cache) loading a bundled or system font
-- [ ] Immediate-mode core: IDs, hot and active widget, focus, keyboard navigation, scrolling, clipping, tooltips
-- [ ] Widgets: label, button, checkbox, drop-down, numeric field with drag-to-change, slider, vec3 editor, color
+- [x] Immediate-mode core: IDs, hot and active widget, focus, keyboard navigation, scrolling, clipping, tooltips
+- [x] Widgets: label, button, checkbox, drop-down, numeric field with drag-to-change, slider, vec3 editor, color
   picker (RGB / HSV / Kelvin), text field, collapsible section, tree view, menu bar, context menu, modal dialog
-- [ ] Layout: fixed panels with splitters (viewport, outliner, inspector, status bar); layout saved per user
-- [ ] Outliner: objects, lights, camera, materials, media and prototypes as a tree; rename, reorder, drag and drop,
+- [x] Layout: fixed panels with splitters (viewport, outliner, inspector, status bar); layout saved per user
+- [x] Outliner: objects, lights, camera, materials, media and prototypes as a tree; rename, reorder, drag and drop,
   show / hide, show which included file an entry belongs to
-- [ ] Inspector generated from the schema: every key of the selected item, with defaults shown and greyed out until
+- [x] Inspector generated from the schema: every key of the selected item, with defaults shown and greyed out until
   set, aliases resolved, and validation errors shown next to the field
-- [ ] In-app file browser (open / save / pick textures and meshes); recent files
-- [ ] Theme (light / dark), all colors as named tokens
+- [x] In-app file browser (open / save / pick textures and meshes); recent files
+- [x] Theme (light / dark), all colors as named tokens
+- How E2 turned out: the platform layer gained `Event::Text`, more keys (Enter, Tab, Backspace, Delete, Insert, End,
+  Page Up / Down), clipboard text, cursor shapes, the double-click time and a scale factor (Win32: the system DPI at
+  start; X11: `Xft.dpi`; macOS: the backing scale). X11 text goes through an input method (`Xutf8LookupString`, dead
+  keys and compose work) and the clipboard both ways is answered and requested by us; protocol errors no longer end
+  the process. macOS text comes from the key event's characters, not a full `NSTextInputClient`, so composing input
+  methods (CJK) do not work there yet; Command counts as Ctrl. Text is drawn by our TrueType reader and rasterizer
+  (`glyf` outlines, composites, `.ttc`, exact-area coverage, glyphs cached at quarter-pixel positions; no hinting, no
+  CFF fonts, no kerning) from a system font (Segoe UI, DejaVu Sans, Arial, ...), with the embedded 8×8 font as the
+  fallback and in tests. The views' labels use it too. The outliner filters by name; renaming a material, medium or
+  prototype renames its references in every file as one undo step (`SceneDoc::group`); dragging reorders lights and
+  objects within their file (whole `[[objects]]` blocks with their comments). The inspector also creates sections the
+  file lacks (`[render]`), wraps problems under their field, and edits inline materials, textures and tables in place.
+  Save As stays in the scene's folder, so that the relative paths in it stay right. Every edit rebuilds the scene (a
+  drag rebuilds it each frame), which is slow for heavy scenes; E3's refit is the fix. A scene the loader rejects
+  opens with an empty view and its error, to be fixed in the editor. `ptedit --snapshot --ui` draws the whole window
+  headless; tests drive the toolkit and the editor with synthetic input (`PTEDIT_TRACE=1` prints window events).
 
 ## E3 — Scene editing
 

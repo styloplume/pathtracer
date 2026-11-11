@@ -965,6 +965,23 @@ pub fn validate(doc: &Table) -> Vec<Diagnostic> {
     out
 }
 
+/// Problems of one key's value, nested tables included (for showing next to a field).
+pub fn check_key(key: &Key, v: &Value) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    check_value(key, v, key.name, &mut out);
+    out
+}
+
+/// Problems of a table of `schema` itself: its type, unknown keys and missing keys (not
+/// the values; see `check_key`).
+pub fn check_entries(schema: &Schema, t: &Table) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    check_table(schema, t, "", &mut out);
+    // Value problems of the table's own keys read "'key' must ..."; nested ones have paths.
+    out.retain(|d| d.path == "scene" && !d.message.starts_with('\''));
+    out
+}
+
 fn push(out: &mut Vec<Diagnostic>, path: &str, problem: Problem, message: String) {
     let path = if path.is_empty() { "scene".to_owned() } else { path.to_owned() };
     out.push(Diagnostic { path, message, problem });

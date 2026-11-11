@@ -6,7 +6,7 @@ A progressive, physically based path tracer in Rust with **zero external crates*
 cargo run --release -p pathtracer -- scenes/cornell.toml              # interactive window
 cargo run --release -p pathtracer -- scenes/spheres.toml --headless   # render to renders/spheres.png
 cargo run --release -p pathtracer -- bench                            # rays/s and build times for every example scene
-cargo run --release -p ptedit -- scenes/cornell.toml                  # the scene editor (early: see EDITOR_ROADMAP.md)
+cargo run --release -p ptedit -- scenes/cornell.toml                  # the scene editor (see EDITOR_ROADMAP.md)
 ```
 
 The scene format is documented in [`docs/scene-format.md`](docs/scene-format.md).
@@ -44,11 +44,28 @@ exposure and tonemap changes are kept unless that part of the file changed.
 
 ### Editor
 
-`ptedit scene.toml` shows the scene in a rasterized viewport (own multithreaded software rasterizer) with its own
-cameras: one perspective view, or top / front / side / perspective. Objects are drawn from the same scene the tracer
-renders; clicking picks through the tracer's BVH. `ptedit --snapshot scene.toml out.png [--size WxH] [--quad]
+`ptedit scene.toml` opens the scene in a window with a menu bar, an **outliner** (left), a rasterized **viewport**
+(middle; own multithreaded software rasterizer, one view or top / front / side / perspective), an **inspector** (right)
+and a status bar. The UI is our own immediate-mode toolkit, with text drawn by our own TrueType rasterizer from a
+system font (or a built-in bitmap font).
+
+- The outliner lists the settings sections, lights, objects, materials, media and prototypes. It filters by name,
+  selects (in the viewport too), renames (double-click or `F2`; renaming a material, medium or prototype renames its
+  references), reorders by dragging, assigns a material dropped on an object, and shows and hides objects and lights
+  in the views. Entries from included files name their file.
+- The inspector shows every key the format knows for the selection, from the schema. Defaults are greyed out until
+  set; `x` removes a key again. Numbers are dragged sideways (`Shift`: finer, `Ctrl`: coarser) or typed (simple
+  expressions such as `1/3` work). Colors have a picker (RGB / HSV / Kelvin), paths a file browser. Validation
+  problems show under their field, and unknown keys are listed.
+- Edits keep the files' formatting, comments and includes. Every edit can be undone; a drag is one step. A scene the
+  loader rejects still opens, so it can be fixed in the editor.
+- Theme (dark / light), panel widths, layout and recent files are kept per user in `settings.toml` in the user's
+  configuration folder (`PTEDIT_SETTINGS` names another file).
+
+Clicking in the viewport picks through the tracer's BVH. `ptedit --snapshot scene.toml out.png [--size WxH] [--quad]
 [--shading wire|solid|shaded|wiresolid] [--select N] [--frames N]` draws the viewport into a PNG without a window
-and prints the frame time. Planned work is in [`EDITOR_ROADMAP.md`](EDITOR_ROADMAP.md).
+and prints the frame time; `--ui [--theme dark|light] [--scale S]` draws the whole editor window instead. Planned work
+is in [`EDITOR_ROADMAP.md`](EDITOR_ROADMAP.md).
 
 | Input | Action |
 |---|---|
@@ -62,8 +79,11 @@ and prints the frame time. Planned work is in [`EDITOR_ROADMAP.md`](EDITOR_ROADM
 | `1`–`4`, `Z` | wireframe / solid / shaded (material colors) / wireframe on solid |
 | `L` / `Space` | one view or four / maximize the view under the mouse |
 | `G` / `B` | grid / bounding boxes of all objects |
-| `Ctrl+A`, `Esc` | select all; clear the selection (`Esc` again quits) |
-| `Ctrl+S`, `Ctrl+Z`, `Ctrl+Y` | save, undo, redo |
+| `H` / `Alt+H` | hide the selection / show everything |
+| `Ctrl+A`, `Esc` | select all; clear the selection |
+| `Tab` / `Shift+Tab`, `Enter`, `Esc` | next / previous field, commit, cancel |
+| `Ctrl+O`, `Ctrl+S`, `Ctrl+Shift+S`, `Ctrl+Q` | open, save, save as (same folder), quit |
+| `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, `F1` | undo, redo, help |
 
 ## Features
 
@@ -109,14 +129,20 @@ and prints the frame time. Planned work is in [`EDITOR_ROADMAP.md`](EDITOR_ROADM
 | `crates/pathtracer/src/main.rs` | the `pathtracer` binary: CLI, headless rendering |
 | `crates/pathtracer/src/bench.rs` | `pathtracer bench`: build times and ray throughput |
 | `crates/pathtracer/src/app.rs` | windowed front end: UI thread, render thread, input, HUD, hot reload |
-| `crates/ptedit/src/main.rs` | the `ptedit` scene editor: window, input, `--check`, `--snapshot` |
+| `crates/ptedit/src/main.rs` | the `ptedit` scene editor: command line, `--check`, `--snapshot` |
+| `crates/ptedit/src/editor.rs` | the editor window: panel layout, menus, status bar, viewport input, commands and shortcuts, dialogs, the event loop |
+| `crates/ptedit/src/outliner.rs` | the outliner: tree of sections and items, select, rename, reorder, drag and drop, show / hide |
+| `crates/ptedit/src/inspector.rs` | the inspector, generated from the schema: a widget per key type, defaults, aliases, problems |
+| `crates/ptedit/src/files.rs` | in-app file browser (open, save as, pick files) |
+| `crates/ptedit/src/settings.rs` | per-user settings: theme, font, layout, recent files |
+| `crates/ptedit/src/ui/` | immediate-mode UI toolkit: ids, hot / active / focus, layers (popups, modals, tooltips), scrolling, widgets, themes, TrueType reader and rasterizer, 8×8 bitmap font |
 | `crates/ptedit/src/workspace.rs` | the editor's state: document, scene, views and layout, selection, picking; draws all views |
 | `crates/ptedit/src/raster.rs` | software rasterizer: clipping, tile binning, multithreaded triangles and lines, reversed depth, id buffer |
 | `crates/ptedit/src/display.rs` | what the viewport draws: meshes per object, shapes as canonical meshes at several levels of detail, boxes |
 | `crates/ptedit/src/render.rs` | one view's frame: culling, level of detail, triangle budget, shading modes, selection outline |
 | `crates/ptedit/src/view.rs` | viewport cameras (perspective / orthographic, top / front / side), projection, picking rays |
 | `crates/ptedit/src/overlay.rs` | grid, axes, axis indicator, camera frustum, light helpers, bounding boxes, selection state |
-| `crates/ptedit/src/paint.rs` | 2D drawing and a 5×7 bitmap font for labels |
+| `crates/ptedit/src/paint.rs` | 2D drawing and a 5×7 bitmap font for labels in headless snapshots |
 | `crates/pt-core/src/document/` | the editor's scene document: the scene's files as editable TOML, the tree of what the merged scene contains and where each item is written, undo / redo |
 | `crates/pt-core/src/schema.rs` | the scene format as data (sections, keys, types, defaults, ranges, aliases); validation with typo suggestions |
 | `crates/pt-core/src/controls.rs` | orbit / pan / look / fly camera controller |

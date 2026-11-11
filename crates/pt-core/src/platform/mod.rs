@@ -1,14 +1,38 @@
 //! Native windowing through raw FFI, no crates: Win32 (GDI), X11 (Xlib, loaded at run
 //! time) and macOS (Cocoa through the Objective-C runtime). Each backend provides a
-//! `Window` with the same methods: `new`, `poll_events`, `client_size`, `present` and
-//! `set_title`.
+//! `Window` with the same methods: `new`, `poll_events`, `client_size`, `present`,
+//! `set_title`, and for UIs `scale_factor`, `set_cursor`, `clipboard_text`,
+//! `set_clipboard_text` and `double_click_time`.
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     pub shift: bool,
+    /// Control; on macOS also Command, the key shortcuts use there.
     pub ctrl: bool,
     pub alt: bool,
 }
+
+/// Mouse pointer shapes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Cursor {
+    #[default]
+    Arrow,
+    /// The I-beam over editable text.
+    Text,
+    /// Resizing left and right (a vertical splitter).
+    ResizeH,
+    /// Resizing up and down (a horizontal splitter).
+    ResizeV,
+    /// A pointing hand over links.
+    Hand,
+    /// Moving in every direction (dragging a number).
+    Move,
+}
+
+/// How quickly a second click must follow for a double click, where the platform does not say.
+pub const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MouseButton {
@@ -58,13 +82,24 @@ pub enum Event {
         delta: f32,
         mods: Modifiers,
     },
+    /// A character typed, after keyboard layout, dead keys and input methods (never a
+    /// control character). Comes in addition to the `KeyDown` of the key.
+    Text(char),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     Escape,
     Space,
+    Enter,
+    Tab,
+    Backspace,
+    Delete,
+    Insert,
     Home,
+    End,
+    PageUp,
+    PageDown,
     Plus,
     Minus,
     Up,
@@ -111,4 +146,15 @@ impl Window {
     }
     pub fn present(&mut self, _pixels: &[u32], _w: usize, _h: usize, _overlay: &[String]) {}
     pub fn set_title(&self, _title: &str) {}
+    pub fn scale_factor(&self) -> f32 {
+        1.0
+    }
+    pub fn set_cursor(&mut self, _cursor: Cursor) {}
+    pub fn clipboard_text(&mut self) -> Option<String> {
+        None
+    }
+    pub fn set_clipboard_text(&mut self, _text: &str) {}
+    pub fn double_click_time(&self) -> Duration {
+        DOUBLE_CLICK
+    }
 }

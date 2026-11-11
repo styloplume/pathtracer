@@ -421,6 +421,114 @@ impl Document {
         self.splice(merged.into_iter().map(|r| (r, String::new())).collect())
     }
 
+    /// Renames the key at `path` (written `key = value`, or as `[sections]` with their
+    /// sub-sections). Keys created by dotted keys (`a.b = 1`) are refused.
+    pub fn rename_key(&mut self, path: &[Seg], new: &str) -> Result<Option<Splice>, String> {
+        let (last, parent_path) = path.split_last().ok_or("cannot rename the document root")?;
+        let Seg::Key(old) = last else { return Err(format!("'{}' is not a key", path_name(path))) };
+        if old == new {
+            return Ok(None);
+        }
+        if new.is_empty() {
+            return Err("a key cannot be empty".into());
+        }
+        let parent = self.get(parent_path).ok_or_else(|| format!("'{}' does not exist", path_name(parent_path)))?;
+        let NodeKind::Table(t) = &parent.kind else {
+            return Err(format!("'{}' is not a table", path_name(parent_path)));
+        };
+        if t.entry(new).is_some() {
+            return Err(format!("'{}' already has '{new}'", path_name(parent_path)));
+        }
+        let e = t.entry(old).ok_or_else(|| format!("'{}' does not exist", path_name(path)))?;
+        let mut edits = Vec::new();
+        let sectioned = match &e.node.kind {
+            NodeKind::Table(tn) => matches!(tn.style, Style::Header { .. } | Style::Implicit),
+            NodeKind::TableArray(_) => true,
+            _ => false,
+        };
+        if sectioned {
+            if let NodeKind::Table(tn) = &e.node.kind
+                && tn.style == Style::Implicit
+                && tn.entries.iter().any(|x| x.line.is_some())
+            {
+                return Err(format!("'{}' is written with dotted keys; rename it by hand", path_name(path)));
+            }
+            // Every header inside names the key at this depth.
+            let depth = parent_path.iter().filter(|s| matches!(s, Seg::Key(_))).count();
+            let mut spans = Vec::new();
+            headers(&e.node, &mut spans);
+            for span in spans {
+                let open = if self.text[span.start..].starts_with("[[") { 2 } else { 1 };
+                let mut p = Parser::new(&self.text[..span.end]);
+                p.pos = span.start + open;
+                p.skip_ws();
+                let keys_start = p.pos;
+                let mut keys = p.key_path()?;
+                if keys.get(depth) != Some(old) {
+                    return Err(format!("unexpected section header in '{}'", path_name(path)));
+                }
+                new.clone_into(&mut keys[depth]);
+                let text = keys.iter().map(|k| format_key(k)).collect::<Vec<_>>().join(".");
+                let end = keys_start + self.text[keys_start..p.pos].trim_end().len();
+                edits.push((keys_start..end, text));
+            }
+        } else {
+            let mut p = Parser::new(&self.text[..e.kv.end]);
+            p.pos = e.kv.start;
+            let keys = p.key_path()?;
+            if keys.len() != 1 {
+                return Err(format!("'{}' is written with a dotted key; rename it by hand", path_name(path)));
+            }
+            let end = e.kv.start + self.text[e.kv.start..p.pos].trim_end().len();
+            edits.push((e.kv.start..end, format_key(new)));
+        }
+        self.splice(edits)
+    }
+
+    /// Moves element `from` of the array (or array of tables) at `path` to position `to`.
+    pub fn move_item(&mut self, path: &[Seg], from: usize, to: usize) -> Result<Option<Splice>, String> {
+        let node = self.get(path).ok_or_else(|| format!("'{}' does not exist", path_name(path)))?;
+        let spans: Vec<Span> = match &node.kind {
+            NodeKind::Array(items) => items.iter().map(|n| n.span.clone()).collect(),
+            NodeKind::TableArray(items) => {
+                let mut v = Vec::new();
+                for n in items {
+                    let mut r = Vec::new();
+                    ranges(n, &mut r);
+                    r.sort_by_key(|s| s.start);
+                    let (start, end) = (r.first().map_or(0, |s| s.start), r.last().map_or(0, |s| s.end));
+                    // One contiguous block per element, or moving it would tear it apart.
+                    if r.windows(2).any(|w| w[1].start > w[0].end) {
+                        return Err(format!("'{}' has sections apart from it; move it by hand", path_name(path)));
+                    }
+                    v.push(start..end);
+                }
+                v
+            }
+            _ => return Err(format!("'{}' is not an array", path_name(path))),
+        };
+        let n = spans.len();
+        if from >= n || to >= n {
+            return Err(format!("'{}' has {n} elements", path_name(path)));
+        }
+        if from == to {
+            return Ok(None);
+        }
+        let nl = self.newline();
+        let tables = matches!(node.kind, NodeKind::TableArray(_));
+        let mut texts: Vec<String> = spans.iter().map(|s| self.text[s.clone()].to_owned()).collect();
+        if tables {
+            for t in &mut texts {
+                if !t.ends_with('\n') {
+                    t.push_str(nl);
+                }
+            }
+        }
+        let moved = texts.remove(from);
+        texts.insert(to, moved);
+        self.splice(spans.into_iter().zip(texts).collect())
+    }
+
     /// Whitespace that starts the line containing the byte before `at` (the indentation of
     /// the previous entry).
     fn indent_before(&self, at: usize) -> String {
@@ -513,6 +621,22 @@ fn ranges(node: &Node, out: &mut Vec<Span>) {
             }
         }
         NodeKind::TableArray(items) => items.iter().for_each(|n| ranges(n, out)),
+        NodeKind::Scalar(_) | NodeKind::Array(_) => {}
+    }
+}
+
+/// The header lines of `node` and of every section inside it.
+fn headers(node: &Node, out: &mut Vec<Span>) {
+    match &node.kind {
+        NodeKind::Table(t) => {
+            if matches!(t.style, Style::Header { .. }) {
+                out.push(node.span.clone());
+            }
+            for e in &t.entries {
+                headers(&e.node, out);
+            }
+        }
+        NodeKind::TableArray(items) => items.iter().for_each(|n| headers(n, out)),
         NodeKind::Scalar(_) | NodeKind::Array(_) => {}
     }
 }
@@ -1152,6 +1276,48 @@ radius = 1.0
         assert!(Document::parse("x = \"\\q\"").unwrap_err().contains("invalid escape"));
         let d = Document::parse("s = \"\\u00e9t\\u00E9 ü\"\n").unwrap();
         assert_eq!(d.value(&p(&["s"])), Some(Value::String("été ü".into())));
+    }
+
+    #[test]
+    fn renames_keys_and_sections() {
+        let mut d = Document::parse(
+            "[materials]\nblue = { albedo = 2 }\n\n[materials.red]   # warm\nalbedo = 1\n\n\
+             [materials.red.texture]\nx = 1\n\n[[prototypes.\"a b\".objects]]\ntype = \"sphere\"\n",
+        )
+        .unwrap();
+        d.rename_key(&p(&["materials", "red"]), "crimson").unwrap();
+        d.rename_key(&p(&["materials", "blue"]), "navy blue").unwrap();
+        d.rename_key(&p(&["prototypes", "a b"]), "ab").unwrap();
+        assert_eq!(
+            d.text(),
+            "[materials]\n\"navy blue\" = { albedo = 2 }\n\n[materials.crimson]   # warm\nalbedo = 1\n\n\
+             [materials.crimson.texture]\nx = 1\n\n[[prototypes.ab.objects]]\ntype = \"sphere\"\n"
+        );
+        assert!(d.rename_key(&p(&["materials", "crimson"]), "navy blue").unwrap_err().contains("already"));
+        let mut dotted = Document::parse("[materials]\nred.albedo = 1\n").unwrap();
+        assert!(dotted.rename_key(&p(&["materials", "red"]), "x").unwrap_err().contains("dotted"));
+        d = dotted;
+        assert!(d.rename_key(&p(&["materials"]), "mats").is_ok());
+    }
+
+    #[test]
+    fn moves_array_elements() {
+        let mut d = Document::parse(SCENE).unwrap();
+        d.push_table(&p(&["objects"]), &[("type".into(), Value::String("box".into()))]).unwrap();
+        let types = |d: &Document| -> Vec<String> {
+            (0..3)
+                .map(|i| d.value(&p(&["objects", &i.to_string(), "type"])).unwrap().as_str().unwrap().into())
+                .collect()
+        };
+        d.move_item(&p(&["objects"]), 2, 0).unwrap();
+        assert_eq!(types(&d), ["box", "quad", "sphere"]);
+        assert!(d.text().contains("[render]\nwidth = 1_280   # pixels"), "the rest stays");
+        d.move_item(&p(&["objects"]), 0, 2).unwrap();
+        assert_eq!(types(&d), ["quad", "sphere", "box"]);
+        assert!(d.text().contains("# The ball\n[[objects]]\ntype = \"sphere\""), "comments move along");
+        d.move_item(&p(&["materials", "red", "albedo"]), 0, 2).unwrap();
+        assert!(d.text().contains("albedo = [0.1, 0.1, 0.8]"));
+        assert!(d.move_item(&p(&["objects"]), 0, 3).is_err());
     }
 
     #[test]

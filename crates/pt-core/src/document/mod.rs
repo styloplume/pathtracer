@@ -92,6 +92,9 @@ pub struct SceneDoc {
     order: Vec<usize>,
     pub tree: Tree,
     history: History,
+    /// While `group` runs: the merge key and label its edits share.
+    group: Option<(String, String)>,
+    groups: u64,
 }
 
 impl SceneDoc {
@@ -102,8 +105,14 @@ impl SceneDoc {
 
     /// Opens a scene whose files are read through `read`.
     pub fn open_from(path: &Path, read: Source<'_>) -> Result<SceneDoc, String> {
-        let mut doc =
-            SceneDoc { files: Vec::new(), order: Vec::new(), tree: Tree::default(), history: History::default() };
+        let mut doc = SceneDoc {
+            files: Vec::new(),
+            order: Vec::new(),
+            tree: Tree::default(),
+            history: History::default(),
+            group: None,
+            groups: 0,
+        };
         doc.load_file(path, read)?;
         doc.rebuild(read)?;
         Ok(doc)
@@ -265,6 +274,10 @@ impl SceneDoc {
     ) -> Result<bool, String> {
         let source = self.files.get_mut(file).ok_or_else(|| format!("no file #{file}"))?;
         let Some(splice) = f(&mut source.doc)? else { return Ok(false) };
+        let (label, merge) = match &self.group {
+            Some((key, label)) => (label.as_str(), Some(key.as_str())),
+            None => (label, merge),
+        };
         self.history.record(label, merge, Change { file, splice: splice.clone() });
         if let Err(e) = self.rebuild(&loader::read_file) {
             // An edit that breaks the include structure (a cycle, a missing file) is refused.
@@ -305,6 +318,81 @@ impl SceneDoc {
     /// Ends the current merged edit.
     pub fn seal(&mut self) {
         self.history.seal();
+    }
+
+    /// Runs `f`, whose edits (in any files) become one undo step named `label`.
+    pub fn group<R>(&mut self, label: &str, f: impl FnOnce(&mut SceneDoc) -> Result<R, String>) -> Result<R, String> {
+        self.history.seal();
+        self.groups += 1;
+        self.group = Some((format!("\u{0}group {}", self.groups), label.to_owned()));
+        let r = f(self);
+        self.group = None;
+        self.history.seal();
+        r
+    }
+
+    /// Renames `item`: a light's or object's `name` (removed when empty), or a material's,
+    /// medium's or prototype's key, with every reference to it in the scene's files.
+    pub fn rename(&mut self, item: &Item, new: &str) -> Result<bool, String> {
+        let new = new.trim();
+        match item.kind {
+            Kind::Light | Kind::Object => {
+                let mut path = item.path.clone();
+                path.push(Seg::from("name"));
+                if new.is_empty() {
+                    if self.value(item.file, &path).is_none() {
+                        return Ok(false);
+                    }
+                    return self.remove(item.file, &path);
+                }
+                self.set(item.file, &path, &Value::String(new.to_owned()))
+            }
+            Kind::Material | Kind::Medium | Kind::Prototype => {
+                if new.is_empty() {
+                    return Err("a name cannot be empty".into());
+                }
+                let old = item.label.clone();
+                if old == new {
+                    return Ok(false);
+                }
+                let taken = match item.kind {
+                    Kind::Material => &self.tree.materials,
+                    Kind::Medium => &self.tree.media,
+                    _ => &self.tree.prototypes,
+                };
+                if taken.iter().any(|i| i.label == new) {
+                    return Err(format!("'{new}' is already defined"));
+                }
+                let keys: &[&str] = match item.kind {
+                    Kind::Material => &["material"],
+                    Kind::Medium => &["interior", "medium", "exterior"],
+                    _ => &["prototype"],
+                };
+                let (file, path) = (item.file, item.path.clone());
+                self.group(&format!("rename {old} to {new}"), |doc| {
+                    doc.edit(file, "rename", None, |d| d.rename_key(&path, new))?;
+                    for f in 0..doc.files.len() {
+                        let mut refs = Vec::new();
+                        references(doc.files[f].doc.root(), &mut Vec::new(), keys, &old, &mut refs);
+                        for p in refs {
+                            doc.set(f, &p, &Value::String(new.to_owned()))?;
+                        }
+                    }
+                    Ok(true)
+                })
+            }
+        }
+    }
+
+    /// Moves light or object `item` to position `to` among the entries of its file.
+    pub fn move_item(&mut self, item: &Item, to: usize) -> Result<bool, String> {
+        let [Seg::Key(list), Seg::Index(from)] = item.path.as_slice() else {
+            return Err(format!("{} cannot be moved", item.label));
+        };
+        let label = format!("move {}", item.label);
+        let path = [Seg::from(list.as_str())];
+        let from = *from;
+        self.edit(item.file, &label, None, |d| d.move_item(&path, from, to))
     }
 
     pub fn history(&self) -> &History {
@@ -348,6 +436,53 @@ impl SceneDoc {
             }
         }
         Ok(written)
+    }
+
+    /// Writes the scene file under a new name in the same folder (so the relative paths it
+    /// holds keep working), then saves the other changed files; the document goes on as
+    /// the new file.
+    pub fn save_as(&mut self, path: &Path) -> Result<Vec<PathBuf>, String> {
+        let dir =
+            |p: &Path| loader::canonical(p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new(".")));
+        if dir(path) != dir(self.path()) {
+            return Err("save as keeps the scene in its folder, so that the paths it holds stay right".into());
+        }
+        if self.files.iter().skip(1).any(|f| loader::canonical(&f.path) == loader::canonical(path)) {
+            return Err(format!("'{}' is included by the scene", path.display()));
+        }
+        write_atomic(path, self.files[0].doc.text())?;
+        self.files[0].path = path.to_path_buf();
+        self.files[0].saved = self.files[0].doc.text().to_owned();
+        let mut written = vec![path.to_path_buf()];
+        written.extend(self.save()?);
+        Ok(written)
+    }
+}
+
+/// Paths of the string values under `node` (at `path`) whose key is one of `keys` and whose
+/// value is `name`.
+fn references(node: &crate::toml::Node, path: &mut Vec<Seg>, keys: &[&str], name: &str, out: &mut Vec<Vec<Seg>>) {
+    match &node.kind {
+        NodeKind::Scalar(Value::String(s)) => {
+            if s == name && matches!(path.last(), Some(Seg::Key(k)) if keys.contains(&k.as_str())) {
+                out.push(path.clone());
+            }
+        }
+        NodeKind::Scalar(_) => {}
+        NodeKind::Table(t) => {
+            for e in &t.entries {
+                path.push(Seg::from(e.key.as_str()));
+                references(&e.node, path, keys, name, out);
+                path.pop();
+            }
+        }
+        NodeKind::Array(items) | NodeKind::TableArray(items) => {
+            for (i, n) in items.iter().enumerate() {
+                path.push(Seg::Index(i));
+                references(n, path, keys, name, out);
+                path.pop();
+            }
+        }
     }
 }
 
