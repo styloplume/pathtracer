@@ -311,6 +311,12 @@ pub struct Throughput<C> {
     hero: Option<usize>,
 }
 
+impl<C: Color> Default for Throughput<C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<C: Color> Throughput<C> {
     pub fn new() -> Self {
         Throughput { beta: C::splat(1.0), r_u: C::splat(1.0), hero: None }

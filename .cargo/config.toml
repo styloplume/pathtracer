@@ -1,5 +1,5 @@
 [alias]
-# Lints as errors, across the binary and its tests.
-lint = "clippy --all-targets --locked -- -D warnings"
+# Lints as errors, across every crate of the workspace and their tests.
+lint = "clippy --workspace --all-targets --locked -- -D warnings"
 # Same, applying machine-applicable fixes.
-lint-fix = "clippy --all-targets --fix --allow-dirty --allow-staged"
+lint-fix = "clippy --workspace --all-targets --fix --allow-dirty --allow-staged"

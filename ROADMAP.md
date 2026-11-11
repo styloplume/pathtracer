@@ -170,3 +170,5 @@ Lipschitz bounds per region (local steps in calm areas of displaced fields); ray
 
 Ideas not yet placed: network/distributed rendering, GPU backend, animation sequences,
 light-path expressions / render passes.
+
+A scene editor and modeler is planned separately in [EDITOR_ROADMAP.md](EDITOR_ROADMAP.md).

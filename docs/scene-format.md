@@ -1,6 +1,6 @@
 # Scene format
 
-Scenes are [TOML](https://toml.io) files. The parser (`src/toml.rs`) supports the common subset: tables `[a.b]`,
+Scenes are [TOML](https://toml.io) files. The parser (`crates/pt-core/src/toml/`) supports the common subset: tables `[a.b]`,
 arrays of tables `[[a]]`, dotted keys, basic and literal strings, integers and floats, booleans, (multi-line) arrays
 and inline tables. Multi-line strings and dates are not supported. Errors report the file and line.
 
@@ -12,7 +12,8 @@ Conventions used below:
 - Angles are in degrees. Scene units are arbitrary, except that the physical camera parameters assume meters.
 - Right-handed coordinates, +Y up. Relative paths are relative to the file that contains them (also inside
   included files).
-- Unknown keys are ignored; invalid values (wrong type, out of range, unknown names) are errors.
+- Unknown keys are ignored with a warning (that suggests the closest known key); invalid values (wrong type, out of
+  range, unknown names) are errors.
 
 A scene has these top-level sections, all optional:
 
@@ -109,7 +110,7 @@ default 1) and `rotate` (degrees: a number rotates about +Y, a vec3 about X, the
 
 | `type` | Keys |
 |---|---|
-| `color` (default) | `color` (default black) |
+| `color` (default; alias `constant`) | `color` (default black) |
 | `gradient` | `zenith`, `horizon`, `ground` colors |
 | `image` (default if `file` is given; aliases `envmap`, `hdri`) | `file`: equirectangular image (`.hdr`, `.pfm`, `.png`, `.jpg`, ...; 8/16-bit images are decoded as sRGB); `color`: multiplier |
 | `sky` (aliases `daylight`, `preetham`) | `sun_elevation` (45), `sun_azimuth` (0; 0 = sun towards −Z, 90 = towards +X) or `sun_direction`; `turbidity` (3, in [1.7, 10]); `ground` albedo (0.2); `sun` (true: add the sun disk as a light); `sun_size` (1 = the real sun; larger gives softer shadows with the same irradiance) |
@@ -117,7 +118,7 @@ default 1) and `rotate` (degrees: a number rotates about +Y, a vec3 about X, the
 ## [[lights]]
 
 Lights without geometry. Every light takes `color` (default white) and/or a black-body `temperature` in Kelvin
-(500–50000), which multiply.
+(500–50000), which multiply, and an optional `name`, a label for the editor.
 
 | `type` | Keys |
 |---|---|
@@ -176,12 +177,12 @@ Wherever a parameter above is marked *texture*, it can be:
 
 | `type` | Keys |
 |---|---|
-| `image` (default if `file` is given) | `file`; `wrap`: `repeat` (default), `clamp`, `mirror`; `scale`, `offset`: UV transform (`[u, v]` or a number); `filter`: `bilinear` (default) or `nearest`; `colorspace`: `srgb` or `linear` (default: sRGB for colors, linear for scalars, normal maps and alpha); `channel`: `r`, `g`, `b`, `a`, `luminance` (for scalar parameters; default: gray, or luminance of RGB) |
-| `checker` | `even` / `color1` (0.8), `odd` / `color2` (0.2): textures; `scale` (8: squares per UV unit or per scene unit); `space`: `uv` (default) or `world` |
-| `noise` (alias `fbm`), `turbulence`, `ridged`, `hybrid`, `terrain` | `low` / `color1` (0), `high` / `color2` (1): textures blended by a noise fractal (see below); `turbulence` (true: turbulence for `type = "noise"`); `space`: `world` (default) or `uv` |
+| `image` (default if `file` is given) | `file`; `wrap`: `repeat` (default), `clamp`, `mirror`; `scale`, `offset`: UV transform (`[u, v]` or a number); `filter`: `bilinear` (default) or `nearest`; `colorspace`: `srgb` or `linear` (default: sRGB for colors, linear for scalars, normal maps and alpha); `channel`: `r`, `g`, `b`, `a`, `luminance` (for scalar parameters; default `auto`: gray, or luminance of RGB) |
+| `checker` (alias `checkerboard`) | `even` / `color1` (0.8), `odd` / `color2` (0.2): textures; `scale` (8: squares per UV unit or per scene unit); `space`: `uv` (default) or `world` |
+| `noise` (alias `fbm`), `turbulence`, `ridged`, `hybrid`, `terrain` (alias `hetero_terrain`) | `low` / `color1` (0), `high` / `color2` (1): textures blended by a noise fractal (see below); `turbulence` (true: turbulence for `type = "noise"`); `space`: `world` (default) or `uv` |
 | `marble` | as the fractals; veins across x, bent by turbulence `amount` (4) |
 | `wood` | as the fractals; rings around the y axis, `scale` per unit, wobbled by fBm `amount` (0.5) |
-| `hypertexture` | the density of a hypertexture (see [Implicit surfaces](#implicit-surfaces)), in [0, 1]; for media fields |
+| `hypertexture` | the density of a hypertexture, in [0, 1], for media fields: `shape`, `softness`, `noise`, `amount`, `bias`, `gain` as for the object (see [Implicit surfaces](#implicit-surfaces)) |
 
 Any texture table also takes `multiplier` (alias `multiply`): a number or color it is multiplied by.
 
@@ -212,7 +213,7 @@ coordinates follow the OBJ convention (v = 0 at the bottom of the image).
 
 ## [[objects]]
 
-Every object has a `type`, an optional `material`, and a transform. The transform is applied as `scale`, then
+Every object has a `type`, an optional `material`, an optional `name` (a label for the editor), and a transform. The transform is applied as `scale`, then
 `rotate` (degrees about X, then Y, then Z), then `translate`:
 
 | Key | Default | Meaning |
@@ -230,7 +231,7 @@ Every object has a `type`, an optional `material`, and a transform. The transfor
 | `box` (alias `cube`) | `min` and `max`, or `center` (origin) and `size` (1) |
 | `quad` | `origin`, `u`, `v`: the parallelogram origin, origin + u, origin + u + v, origin + v. Its normal is u × v; UVs run from (0, 0) to (1, 1) |
 | `triangle` | `p0`, `p1`, `p2` |
-| `mesh` (default if `file` is given) | `file`: `.obj`, `.ply`, `.stl`, `.gltf`, `.glb`; `smooth` (true: use the file's vertex normals) |
+| `mesh` (default if `file` is given; aliases `gltf`, `stl`) | `file`: `.obj`, `.ply`, `.stl`, `.gltf`, `.glb`; `smooth` (true: use the file's vertex normals) |
 | `instance` | `prototype`: name of a `[prototypes.NAME]`; `scatter` (see below). Instances cannot set a material |
 | `sdf` (alias `implicit`), `hypertexture`, `julia`, `mandelbulb`, `menger` | implicit surfaces, see below |
 

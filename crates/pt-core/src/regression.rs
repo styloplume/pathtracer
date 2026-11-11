@@ -45,7 +45,7 @@ struct Quiet;
 impl Progress for Quiet {}
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    crate::repo_root()
 }
 
 /// Renders `scene` (a path relative to the crate root) at the regression settings.

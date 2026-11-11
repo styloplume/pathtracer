@@ -1,0 +1,11 @@
+[package]
+name = "ptedit"
+version.workspace = true
+edition.workspace = true
+description = "Scene layout editor for the path tracer"
+
+[dependencies]
+pt-core.workspace = true
+
+[lints]
+workspace = true

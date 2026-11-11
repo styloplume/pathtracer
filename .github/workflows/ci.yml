@@ -41,16 +41,16 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           rustup target add x86_64-apple-darwin
-          cargo clippy --target x86_64-apple-darwin --all-targets --locked -- -D warnings
+          cargo clippy --workspace --target x86_64-apple-darwin --all-targets --locked -- -D warnings
 
       - name: Docs
-        run: cargo doc --no-deps --document-private-items --locked
+        run: cargo doc --workspace --no-deps --document-private-items --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
       # Unit tests, the zero-allocation check and the reference-image regression tests.
       - name: Test
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
       - name: Upload regression images
         if: failure()
@@ -61,7 +61,11 @@ jobs:
           if-no-files-found: ignore
 
       - name: Release build
-        run: cargo build --release --locked
+        run: cargo build --workspace --release --locked
+
+      - name: Scene check
+        if: runner.os == 'Linux'
+        run: for s in scenes/*.toml; do ./target/release/ptedit --check "$s" > /dev/null; done
 
       - name: Benchmark
         if: runner.os == 'Linux'

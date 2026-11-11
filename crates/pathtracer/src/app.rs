@@ -1,15 +1,16 @@
 //! Interactive windowed front end: a UI thread (input, camera, display, hot reload)
 //! and a render thread that restarts the progressive render whenever the view changes.
 
-use crate::controls::CameraController;
-use crate::denoise::denoise;
-use crate::image::{Encoder, Tonemap};
-use crate::math::Vec3;
-use crate::output::Snapshot;
-use crate::platform::{Event, Key, Modifiers, MouseButton, Window};
-use crate::renderer::{self, PassInfo, Pixel, Progress, Shader, View};
-use crate::scene::Scene;
-use crate::{Args, apply_overrides, loader, pass_summary, save_outputs, scene_stem};
+use crate::{Args, apply_overrides, pass_summary, save_outputs, scene_stem};
+use pt_core::controls::CameraController;
+use pt_core::denoise::denoise;
+use pt_core::image::{Encoder, Tonemap};
+use pt_core::loader;
+use pt_core::math::Vec3;
+use pt_core::output::Snapshot;
+use pt_core::platform::{Event, Key, Modifiers, MouseButton, Window};
+use pt_core::renderer::{self, PassInfo, Pixel, Progress, Shader, View};
+use pt_core::scene::Scene;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -81,7 +82,7 @@ struct Frame {
 
 struct Shared {
     scene: Mutex<Arc<Scene>>,
-    camera: Mutex<crate::camera::CameraDesc>,
+    camera: Mutex<pt_core::camera::CameraDesc>,
     /// Render resolution.
     size: Mutex<(usize, usize)>,
     /// Bumped to make the render thread restart.

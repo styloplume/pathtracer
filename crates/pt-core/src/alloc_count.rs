@@ -79,7 +79,7 @@ mod tests {
     /// recording and a trained path guide, allocates nothing.
     #[test]
     fn path_tracing_does_not_allocate() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenes");
+        let dir = crate::repo_root().join("scenes");
         let mut scenes: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().path())

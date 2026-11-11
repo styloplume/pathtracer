@@ -3,9 +3,10 @@
 A progressive, physically based path tracer in Rust with **zero external crates** — only `std`.
 
 ```
-cargo run --release -- scenes/cornell.toml               # interactive window
-cargo run --release -- scenes/spheres.toml --headless    # render to renders/spheres.png
-cargo run --release -- bench                             # rays/s and build times for every example scene
+cargo run --release -p pathtracer -- scenes/cornell.toml              # interactive window
+cargo run --release -p pathtracer -- scenes/spheres.toml --headless   # render to renders/spheres.png
+cargo run --release -p pathtracer -- bench                            # rays/s and build times for every example scene
+cargo run --release -p ptedit -- scenes/cornell.toml                  # the scene editor (early: see EDITOR_ROADMAP.md)
 ```
 
 The scene format is documented in [`docs/scene-format.md`](docs/scene-format.md).
@@ -82,41 +83,45 @@ exposure and tonemap changes are kept unless that part of the file changed.
 
 | File | Purpose |
 |---|---|
-| `src/main.rs` | CLI, headless rendering |
-| `src/bench.rs` | `pathtracer bench`: build times and ray throughput |
-| `src/app.rs` | windowed front end: UI thread, render thread, input, HUD, hot reload |
-| `src/controls.rs` | orbit / pan / look / fly camera controller |
-| `src/renderer.rs` | progressive coarse-to-fine scheduling, adaptive sampling, threading, progress callbacks, display views |
-| `src/integrator.rs` | volumetric path tracing with NEE + MIS, subsurface walks, guided sampling, AOVs; generic over RGB / spectral |
-| `src/medium.rs` | media, free-flight sampling, transmittance, phase function, equi-angular sampling, `.vol` grids |
-| `src/guiding.rs` | path guiding SD-tree |
-| `src/sampler.rs` | independent / Owen-scrambled Sobol / blue-noise samplers |
-| `src/lights.rs` | light types, light sampling (sphere cones, spherical triangles), light BVH |
-| `src/environment.rs` | environment maps and their importance sampling |
-| `src/sky.rs` | Preetham sky and sun |
-| `src/spectrum.rs` | wavelength sampling, colour matching, RGB uplift, black bodies |
-| `src/filter.rs` | reconstruction filters |
-| `src/denoise.rs` | à-trous denoiser |
-| `src/output.rs` | output naming, formats, denoised / AOV images |
-| `src/deflate.rs` | DEFLATE / zlib compressor and decompressor |
-| `src/material.rs` | materials, BSDF lobes, Fresnel, energy compensation tables |
-| `src/texture.rs` | image / procedural / triplanar textures, solid gradients for bump mapping |
-| `src/noise.rs` | Perlin noise with gradients, fractals (fBm, turbulence, multifractals, warping), marble / wood |
-| `src/implicit.rs` | signed distance fields, smooth CSG, hypertexture, fractal distance estimators, sphere tracing |
-| `src/scene.rs` | scene data, geometry groups and instances, two-level traversal, alpha testing, UVs / tangents |
-| `src/bvh.rs` | parallel binned-SAH build, 4-wide BVH and its traversal |
-| `src/geometry.rs`, `src/shapes.rs` | bounds, watertight triangles; spheres, disks, cylinders, boxes, implicit surfaces |
-| `src/camera.rs` | perspective / orthographic / fisheye / equirect cameras, shutter and camera motion, pixel ray cones |
-| `src/loader.rs` | TOML → scene: sections, materials, textures, MTL → material mapping |
-| `src/loader/objects.rs` | objects, transforms, motion, prototypes / instances, mesh and glTF import |
-| `src/loader/include.rs` | scene includes |
-| `src/loader/procedural.rs` | noise fractal parameters, SDF trees, hypertextures, fractal objects |
-| `src/imageio.rs`, `src/jpeg.rs` | image decoders |
-| `src/gltf.rs`, `src/json.rs` | glTF 2.0 reader and its JSON parser |
-| `src/toml.rs`, `src/mesh.rs`, `src/mtl.rs`, `src/image.rs` | parsers / writers (mesh.rs: OBJ, PLY, STL) |
-| `src/platform/` | native windows: `win32.rs`, `x11.rs`, `macos.rs` |
-| `src/regression.rs` | reference-image regression tests (`testdata/regression/`) |
-| `src/alloc_count.rs` | counting allocator for tests; checks the path-tracing hot path never allocates |
+| `crates/pathtracer/src/main.rs` | the `pathtracer` binary: CLI, headless rendering |
+| `crates/pathtracer/src/bench.rs` | `pathtracer bench`: build times and ray throughput |
+| `crates/pathtracer/src/app.rs` | windowed front end: UI thread, render thread, input, HUD, hot reload |
+| `crates/ptedit/src/main.rs` | the `ptedit` scene editor: opens, shows and saves a scene document; `ptedit --check` |
+| `crates/pt-core/src/document/` | the editor's scene document: the scene's files as editable TOML, the tree of what the merged scene contains and where each item is written, undo / redo |
+| `crates/pt-core/src/schema.rs` | the scene format as data (sections, keys, types, defaults, ranges, aliases); validation with typo suggestions |
+| `crates/pt-core/src/controls.rs` | orbit / pan / look / fly camera controller |
+| `crates/pt-core/src/renderer.rs` | progressive coarse-to-fine scheduling, adaptive sampling, threading, progress callbacks, display views |
+| `crates/pt-core/src/integrator.rs` | volumetric path tracing with NEE + MIS, subsurface walks, guided sampling, AOVs; generic over RGB / spectral |
+| `crates/pt-core/src/medium.rs` | media, free-flight sampling, transmittance, phase function, equi-angular sampling, `.vol` grids |
+| `crates/pt-core/src/guiding.rs` | path guiding SD-tree |
+| `crates/pt-core/src/sampler.rs` | independent / Owen-scrambled Sobol / blue-noise samplers |
+| `crates/pt-core/src/lights.rs` | light types, light sampling (sphere cones, spherical triangles), light BVH |
+| `crates/pt-core/src/environment.rs` | environment maps and their importance sampling |
+| `crates/pt-core/src/sky.rs` | Preetham sky and sun |
+| `crates/pt-core/src/spectrum.rs` | wavelength sampling, colour matching, RGB uplift, black bodies |
+| `crates/pt-core/src/filter.rs` | reconstruction filters |
+| `crates/pt-core/src/denoise.rs` | à-trous denoiser |
+| `crates/pt-core/src/output.rs` | output naming, formats, denoised / AOV images |
+| `crates/pt-core/src/deflate.rs` | DEFLATE / zlib compressor and decompressor |
+| `crates/pt-core/src/material.rs` | materials, BSDF lobes, Fresnel, energy compensation tables |
+| `crates/pt-core/src/texture.rs` | image / procedural / triplanar textures, solid gradients for bump mapping |
+| `crates/pt-core/src/noise.rs` | Perlin noise with gradients, fractals (fBm, turbulence, multifractals, warping), marble / wood |
+| `crates/pt-core/src/implicit.rs` | signed distance fields, smooth CSG, hypertexture, fractal distance estimators, sphere tracing |
+| `crates/pt-core/src/scene.rs` | scene data, geometry groups and instances, two-level traversal, alpha testing, UVs / tangents |
+| `crates/pt-core/src/bvh.rs` | parallel binned-SAH build, 4-wide BVH and its traversal |
+| `crates/pt-core/src/geometry.rs`, `crates/pt-core/src/shapes.rs` | bounds, watertight triangles; spheres, disks, cylinders, boxes, implicit surfaces |
+| `crates/pt-core/src/camera.rs` | perspective / orthographic / fisheye / equirect cameras, shutter and camera motion, pixel ray cones |
+| `crates/pt-core/src/loader.rs` | TOML → scene: sections, materials, textures, MTL → material mapping |
+| `crates/pt-core/src/loader/objects.rs` | objects, transforms, motion, prototypes / instances, mesh and glTF import |
+| `crates/pt-core/src/loader/include.rs` | scene includes |
+| `crates/pt-core/src/loader/procedural.rs` | noise fractal parameters, SDF trees, hypertextures, fractal objects |
+| `crates/pt-core/src/imageio.rs`, `crates/pt-core/src/jpeg.rs` | image decoders |
+| `crates/pt-core/src/gltf.rs`, `crates/pt-core/src/json.rs` | glTF 2.0 reader and its JSON parser |
+| `crates/pt-core/src/toml/` | TOML reader and format-preserving editor (spans for every value, edits as text splices) |
+| `crates/pt-core/src/mesh.rs`, `crates/pt-core/src/mtl.rs`, `crates/pt-core/src/image.rs` | parsers / writers (mesh.rs: OBJ, PLY, STL) |
+| `crates/pt-core/src/platform/` | native windows: `win32.rs`, `x11.rs`, `macos.rs` |
+| `crates/pt-core/src/regression.rs` | reference-image regression tests (`testdata/regression/`) |
+| `crates/pt-core/src/alloc_count.rs` | counting allocator for tests; checks the path-tracing hot path never allocates |
 | `docs/scene-format.md` | scene file reference |
 
 ## Development
@@ -126,15 +131,17 @@ The toolchain is pinned in `rust-toolchain.toml`; rustup installs it with `rustf
 | Command | Checks |
 |---|---|
 | `cargo fmt --all` | formatting (`rustfmt.toml`: 120 columns) |
-| `cargo lint` | clippy over the binary and tests, warnings as errors |
+| `cargo lint` | clippy over every crate and its tests, warnings as errors |
 | `cargo lint-fix` | applies clippy's machine-applicable fixes |
 | `cargo test --release` | unit tests, the zero-allocation check and reference-image regression tests |
 | `PT_BLESS=1 cargo test --release regression` | re-creates the regression references after an intended change |
-| `cargo run --release -- bench` | performance: build times, rays/s, paths/s |
+| `cargo run --release -p pathtracer -- bench` | performance: build times, rays/s, paths/s |
 
-Lint policy is in `Cargo.toml` under `[lints]`: `clippy::pedantic` plus a few restriction lints, with
+The repository is a Cargo workspace: `pt-core` (library: scene model and format, loaders, BVH, renderer,
+platform layer) and the `pathtracer` and `ptedit` binaries. Lint policy is in the root `Cargo.toml` under
+`[workspace.lints]`: `clippy::pedantic` plus a few restriction lints, with
 numeric-cast lints turned off as noise for renderer code. `unsafe` is denied everywhere except
-the platform backends in `src/platform/` and the test-only counting allocator, and every `unsafe` block needs a
+the platform backends in `crates/pt-core/src/platform/` and the test-only counting allocator, and every `unsafe` block needs a
 `// SAFETY:` comment. Silence a lint at a site
 with `#[expect(lint, reason = "...")]`; plain `#[allow]` and a missing reason are both flagged.
 

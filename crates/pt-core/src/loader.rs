@@ -30,9 +30,41 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+pub use include::{Source, canonical, include_path, includes, read_file};
+
+/// Loads a scene file. Unknown keys are reported as warnings; everything else invalid is
+/// an error.
 pub fn load_scene(path: &Path) -> Result<Scene, String> {
+    load(path, &read_file, true)
+}
+
+/// The scene file `path` with its includes merged, as plain values (entries from included
+/// files carry their directory under a hidden `$dir` key).
+pub fn load_document(path: &Path) -> Result<Table, String> {
+    load_document_from(path, &read_file)
+}
+
+/// `load_document` with the files' texts from `read`.
+pub fn load_document_from(path: &Path, read: Source<'_>) -> Result<Table, String> {
+    include::load_doc(path, &mut Vec::new(), &mut Vec::new(), read)
+}
+
+/// Loads a scene whose files' texts come from `read` (the editor's unsaved documents),
+/// without printing warnings (the caller shows `schema::validate`'s diagnostics).
+pub fn load_scene_from(path: &Path, read: Source<'_>) -> Result<Scene, String> {
+    load(path, read, false)
+}
+
+fn load(path: &Path, read: Source<'_>, warn: bool) -> Result<Scene, String> {
     let mut files = vec![path.to_path_buf()];
-    let doc = include::load_doc(path, &mut files, &mut Vec::new())?;
+    let doc = include::load_doc(path, &mut files, &mut Vec::new(), read)?;
+    if warn {
+        for d in crate::schema::validate(&doc) {
+            if d.problem == crate::schema::Problem::UnknownKey {
+                eprintln!("warning: {d}");
+            }
+        }
+    }
     let base_dir = path.parent().unwrap_or(Path::new("."));
 
     let empty = Table::new();
@@ -1158,7 +1190,7 @@ mod tests {
     /// Every example scene loads, and the demo scenes build what they promise.
     #[test]
     fn example_scenes_load() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenes");
+        let dir = crate::repo_root().join("scenes");
         let mut n = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();

@@ -1,0 +1,10 @@
+[package]
+name = "pt-core"
+version.workspace = true
+edition.workspace = true
+description = "Scene model, loaders, BVH, renderer and platform layer shared by the path tracer and the editor"
+
+[dependencies]
+
+[lints]
+workspace = true

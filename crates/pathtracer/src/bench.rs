@@ -11,12 +11,12 @@
 //!
 //! Work is spread over the render threads with an atomic row counter, as in rendering.
 
-use crate::camera::Camera;
-use crate::loader;
-use crate::math::{Frame, Ray, Vec3, offset_origin};
-use crate::sampler::Sampler;
-use crate::sampling::cosine_hemisphere;
-use crate::scene::Scene;
+use pt_core::camera::Camera;
+use pt_core::loader;
+use pt_core::math::{Frame, Ray, Vec3, offset_origin};
+use pt_core::sampler::Sampler;
+use pt_core::sampling::cosine_hemisphere;
+use pt_core::scene::Scene;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -174,7 +174,7 @@ struct Origin {
 }
 
 fn bench_scene(scene: &Scene, name: String, load: Duration, w: usize, h: usize, min_time: Duration) -> Row {
-    let threads = crate::renderer::thread_count(scene);
+    let threads = pt_core::renderer::thread_count(scene);
     let camera = Camera::new(&scene.camera, w as f32 / h as f32);
     let cone = camera.cone(h);
     let kind = scene.settings.sampler;
@@ -236,7 +236,7 @@ fn bench_scene(scene: &Scene, name: String, load: Duration, w: usize, h: usize, 
     let paths = measure(threads, h, min_time, |y, pass| {
         for x in 0..w {
             if let Some((ray, mut s)) = camera_ray(x, y, pass) {
-                std::hint::black_box(crate::integrator::radiance(scene, ray, cone, &mut s, None));
+                std::hint::black_box(pt_core::integrator::radiance(scene, ray, cone, &mut s, None));
             }
         }
         w as u64

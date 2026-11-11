@@ -450,8 +450,8 @@ mod tests {
     /// differ in IDCT precision and chroma upsampling, so only small errors are allowed.
     #[test]
     fn matches_reference_decoder() {
-        let img = decode(include_bytes!("../testdata/gradient.jpg")).unwrap();
-        let reference = include_bytes!("../testdata/gradient.rgb");
+        let img = decode(include_bytes!("../../../testdata/gradient.jpg")).unwrap();
+        let reference = include_bytes!("../../../testdata/gradient.rgb");
         assert_eq!((img.width, img.height, img.channels), (45, 33, 3));
         let Pixels::U8(px) = &img.pixels else { panic!() };
         let (mut sum, mut max) = (0u64, 0u8);

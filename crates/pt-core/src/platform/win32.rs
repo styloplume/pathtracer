@@ -401,7 +401,7 @@ impl Window {
         }
     }
 
-    #[expect(clippy::unused_self, reason = "ties message pumping to the window's owner thread")]
+    // `&mut self` (unused) ties message pumping to the window's owner thread.
     pub fn poll_events(&mut self) -> Vec<Event> {
         // SAFETY: MSG is plain old data, so all-zero is valid; `msg` outlives each call that borrows it.
         unsafe {

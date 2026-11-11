@@ -1,15 +1,19 @@
-[package]
-name = "pathtracer"
+[workspace]
+resolver = "3"
+members = ["crates/pt-core", "crates/pathtracer", "crates/ptedit"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "A progressive, physically based path tracer with zero external dependencies"
 
 # Intentionally empty: everything is implemented on top of `std`.
-[dependencies]
+[workspace.dependencies]
+pt-core = { path = "crates/pt-core" }
 
 # Lints are warnings here so a toolchain bump never breaks a plain `cargo build`;
 # `cargo lint` (see .cargo/config.toml) and the pre-commit hook promote them to errors.
-[lints.rust]
+# Every crate opts in with `[lints] workspace = true`.
+[workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
 # Unsafe is confined to the platform FFI layer, which opts back in explicitly.
 unsafe_code = "deny"
@@ -18,7 +22,7 @@ unused_lifetimes = "warn"
 unused_macro_rules = "warn"
 trivial_numeric_casts = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Numeric casts between pixel indices, sample counts and floats are pervasive and intentional
@@ -30,6 +34,12 @@ cast_sign_loss = "allow"
 # Math code uses short conventional names (u, v, n, wi, wo, ...).
 many_single_char_names = "allow"
 similar_names = "allow"
+# pt-core is a library shared by our own binaries, not a published API: errors are
+# self-describing strings, and annotating every getter with #[must_use] adds only noise.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
 # Hand-picked restriction lints.
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"

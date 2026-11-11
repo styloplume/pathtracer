@@ -9,4 +9,4 @@ echo "pre-commit: cargo lint (clippy -D warnings)"
 cargo --quiet lint
 
 echo "pre-commit: cargo doc"
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items --quiet
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --quiet

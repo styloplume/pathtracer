@@ -1,0 +1,11 @@
+[package]
+name = "pathtracer"
+version.workspace = true
+edition.workspace = true
+description = "A progressive, physically based path tracer with zero external dependencies"
+
+[dependencies]
+pt-core.workspace = true
+
+[lints]
+workspace = true

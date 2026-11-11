@@ -5,3 +5,17 @@ version = 4
 [[package]]
 name = "pathtracer"
 version = "0.1.0"
+dependencies = [
+ "pt-core",
+]
+
+[[package]]
+name = "pt-core"
+version = "0.1.0"
+
+[[package]]
+name = "ptedit"
+version = "0.1.0"
+dependencies = [
+ "pt-core",
+]

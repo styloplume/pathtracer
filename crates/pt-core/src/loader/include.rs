@@ -22,37 +22,66 @@ pub(super) fn dir_of(t: &Table, default: &Path) -> PathBuf {
     }
 }
 
-/// Parses `path` with everything it includes, recursively. Included files are appended
-/// to `files`; `stack` holds the files being included (for cycle detection).
-pub(super) fn load_doc(path: &Path, files: &mut Vec<PathBuf>, stack: &mut Vec<PathBuf>) -> Result<Table, String> {
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if stack.contains(&canon) {
-        return Err(format!("include cycle: '{}' includes itself", path.display()));
-    }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
-    let mut doc = toml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    let includes: Vec<String> = match doc.remove("include") {
-        None => Vec::new(),
-        Some(Value::String(s)) => vec![s],
+/// Reads the text of a scene file.
+pub type Source<'a> = &'a dyn Fn(&Path) -> Result<String, String>;
+
+/// Reads a scene file from disk.
+pub fn read_file(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))
+}
+
+/// The files named by a document's `include` key, as written.
+pub fn includes(doc: &Table) -> Result<Vec<String>, String> {
+    match doc.get("include") {
+        None => Ok(Vec::new()),
+        Some(Value::String(s)) => Ok(vec![s.clone()]),
         Some(Value::Array(a)) => a
             .iter()
             .map(|v| v.as_str().map(str::to_owned))
             .collect::<Option<_>>()
-            .ok_or_else(|| format!("{}: 'include' must be a string or an array of strings", path.display()))?,
-        Some(_) => return Err(format!("{}: 'include' must be a string or an array of strings", path.display())),
-    };
+            .ok_or_else(|| "'include' must be a string or an array of strings".into()),
+        Some(_) => Err("'include' must be a string or an array of strings".into()),
+    }
+}
+
+/// Where an `include` entry of the file at `path` points.
+pub fn include_path(path: &Path, include: &str) -> PathBuf {
+    path.parent().unwrap_or(Path::new(".")).join(include)
+}
+
+/// The identity of a file for include-cycle detection.
+pub fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Parses `path` with everything it includes, recursively. Included files are appended
+/// to `files`; `stack` holds the files being included (for cycle detection).
+pub(super) fn load_doc(
+    path: &Path,
+    files: &mut Vec<PathBuf>,
+    stack: &mut Vec<PathBuf>,
+    read: Source<'_>,
+) -> Result<Table, String> {
+    let canon = canonical(path);
+    if stack.contains(&canon) {
+        return Err(format!("include cycle: '{}' includes itself", path.display()));
+    }
+    let text = read(path)?;
+    let mut doc = toml::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let includes = includes(&doc).map_err(|e| format!("{}: {e}", path.display()))?;
+    doc.remove("include");
     if includes.is_empty() {
         return Ok(doc);
     }
-    let dir = path.parent().unwrap_or(Path::new("."));
     stack.push(canon);
     let mut merged = Table::new();
     for inc in includes {
-        let p = dir.join(&inc);
+        let p = include_path(path, &inc);
         if !files.contains(&p) {
             files.push(p.clone());
         }
-        let mut sub = load_doc(&p, files, stack).map_err(|e| format!("{e}\n  (included from '{}')", path.display()))?;
+        let mut sub =
+            load_doc(&p, files, stack, read).map_err(|e| format!("{e}\n  (included from '{}')", path.display()))?;
         annotate(&mut sub, p.parent().unwrap_or(Path::new(".")));
         merge(&mut merged, sub);
     }
@@ -134,7 +163,7 @@ mod tests {
         )
         .unwrap();
         let mut files = Vec::new();
-        let doc = load_doc(&d.join("scene.toml"), &mut files, &mut Vec::new()).unwrap();
+        let doc = load_doc(&d.join("scene.toml"), &mut files, &mut Vec::new(), &read_file).unwrap();
         assert_eq!(files, [d.join("lib/materials.toml")]);
         let render = doc["render"].as_table().unwrap();
         assert_eq!((render["spp"].as_f64(), render["width"].as_f64()), (Some(64.0), Some(100.0)));
@@ -158,7 +187,7 @@ mod tests {
         let d = temp_dir("cycle");
         std::fs::write(d.join("a.toml"), "include = \"b.toml\"\n").unwrap();
         std::fs::write(d.join("b.toml"), "include = \"a.toml\"\n").unwrap();
-        let e = load_doc(&d.join("a.toml"), &mut Vec::new(), &mut Vec::new()).unwrap_err();
+        let e = load_doc(&d.join("a.toml"), &mut Vec::new(), &mut Vec::new(), &read_file).unwrap_err();
         assert!(e.contains("cycle"), "{e}");
         std::fs::remove_dir_all(d).ok();
     }

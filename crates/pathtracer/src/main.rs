@@ -1,50 +1,13 @@
-#[cfg(test)]
-mod alloc_count;
+//! `pathtracer`: the command-line renderer and its progressive preview window.
+
 mod app;
 mod bench;
-mod bvh;
-mod camera;
-mod controls;
-mod deflate;
-mod denoise;
-mod environment;
-mod filter;
-mod geometry;
-mod gltf;
-mod guiding;
-mod image;
-mod imageio;
-mod implicit;
-mod integrator;
-mod jpeg;
-mod json;
-mod lights;
-mod loader;
-mod material;
-mod math;
-mod medium;
-mod mesh;
-mod mtl;
-mod noise;
-mod output;
-mod platform;
-#[cfg(test)]
-mod regression;
-mod renderer;
-mod rng;
-mod sampler;
-mod sampling;
-mod scene;
-mod shapes;
-mod sky;
-mod spectrum;
-mod texture;
-mod toml;
 
-use image::Encoder;
-use output::Snapshot;
-use renderer::{PassInfo, Pixel, Progress};
-use scene::Scene;
+use pt_core::image::Encoder;
+use pt_core::output::{self, Snapshot};
+use pt_core::renderer::{self, PassInfo, Pixel, Progress};
+use pt_core::scene::Scene;
+use pt_core::{loader, sampler};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
