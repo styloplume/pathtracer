@@ -1,0 +1,55 @@
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  # Weekly, so newly published advisories surface without a commit.
+  # Scheduled runs use the default branch only, and GitHub disables them
+  # after 60 days without repository activity.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      # The tracking files let `cargo install` recognise the cached binary;
+      # without them it refuses to overwrite it. A new key per run keeps the
+      # cache current when cargo-audit releases a new version.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-audit-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: cargo-audit-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+
+      # Built from source with the pinned toolchain; a no-op when the cached binary is current.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit
+        run: cargo audit --deny warnings

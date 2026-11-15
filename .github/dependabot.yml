@@ -4,3 +4,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+  # No external crates yet; this takes effect as soon as one is added.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
